@@ -1,0 +1,4156 @@
+Created At: 2026-06-26T10:36:58+05:30
+Completed At: 2026-06-26T10:36:58+05:30
+File Path: `file:///C:/Users/Mehak/OneDrive/Desktop/Floor%20to%203D/floor_to_3d/backend/app/services/vision/algorithms.py`
+Total Lines: 631
+Total Bytes: 26495
+Showing lines 1 to 631
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import cv2
+2: import os
+3: def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width, structural_mask=None):
+4:     """
+5:     v4 pipeline:
+6:     Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
+7:     while keeping the v4 debug logs.
+8:     """
+9:     from collections import deque, defaultdict
+10:     import numpy as np
+11:     import cv2
+12:     import os
+13: 
+14:     os.makedirs("uploads/debug", exist_ok=True)
+15: 
+16:     cv2.imwrite("uploads/debug/walls.png", wall_mask)
+17: 
+18:     aspect = height / width
+19: 
+20:     def to_px(nx, nz):
+21:         px = int((nx + 10) / 20 * width)
+22:         py = int((nz / aspect + 10) / 20 * height)
+23:         return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+24: 
+25:     def to_3d(px, py):
+26:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+27: 
+28:     # Use structural_mask (pre-CLOSE, furniture-free) when available.
+29:     # This prevents furniture outlines thickened by MORPH_CLOSE from fragmenting free space.
+30:     mask_for_free = structural_mask if structural_mask is not None else wall_mask
+31:     free = (mask_for_free == 0).astype(np.uint8) * 255
+32:     cv2.imwrite("uploads/debug/struct_free.png", free)
+33: 
+34:     # 2. Room Extraction -> Distance Transform Cores
+35:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+36:     dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+37:     local_max = cv2.dilate(dist_smooth, np.ones((7, 7)))
+38:     core_threshold = 2
+39:     cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+40:     cores = cv2.dilate(cores, np.ones((3, 3)))
+41: 
+42:     cv2.imwrite("uploads/debug/room_cores.png", cores)
+43: 
+44:     num_labels, comp_map = cv2.connectedComponents(cores)
+45: 
+46:     # Core BFS to partition free space (Voronoi of cores)
+47:     queue = deque()
+48:     region_map = np.zeros_like(comp_map, dtype=np.int32)
+49: 
+50:     ys, xs = np.where(comp_map > 0)
+51:     for y, x in zip(ys, xs):
+52:         queue.append((x, y, comp_map[y, x]))
+53:         region_map[y, x] = comp_map[y, x]
+54: 
+55:     while queue:
+56:         x, y, cid = queue.popleft()
+57:         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+58:             nx, ny = x + dx, y + dy
+59:             if 0 <= nx < width and 0 <= ny < height:
+60:                 if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+61:                     region_map[ny, nx] = cid
+62:                     queue.append((nx, ny, cid))
+63: 
+64:     # 3. Label-to-Room Matching
+65:     rooms_raw = list(rooms_raw)
+66:     core_to_labels = defaultdict(list)
+67:     for idx, room in enumerate(rooms_raw):
+68:         sx, sy = to_px(room['x'], room['z'])
+69:         cid = region_map[sy, sx]
+70: 
+71:         if cid == 0:
+72:             # OCR label landed on a wall or outside. Radial search for nearest region.
+73:             found = 0
+74:             for r in range(1, int(min(width, height) * 0.1), 2):
+75:                 y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+76:                 x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+77:                 roi = region_map[y_min:y_max + 1, x_min:x_max + 1]
+78:                 if np.any(roi > 0):
+79:                     ys_roi, xs_roi = np.where(roi > 0)
+80:                     ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+81:                     dists = (xs_global - sx) ** 2 + (ys_global - sy) ** 2
+82:                     min_idx = np.argmin(dists)
+83:                     found = region_map[ys_global[min_idx], xs_global[min_idx]]
+84:                     break
+85:             cid = found
+86: 
+87:         if cid > 0:
+88:             core_to_labels[cid].append((idx, sx, sy))
+89: 
+90:     # 4. Region Generation & Open-Plan Sub-partitioning
+91:     room_masks = {}
+92:     for cid, labels in core_to_labels.items():
+93:         core_mask = (region_map == cid)
+94:         if len(labels) == 1:
+95:             room_masks[labels[0][0]] = core_mask
+96:         else:
+97:             # Multiple labels in one region (Open Plan) -> Sub-partition using Voronoi
+98:             ys, xs = np.where(core_mask)
+99:             pts = np.column_stack((xs, ys))
+100:             label_pts = np.array([[l[1], l[2]] for l in labels])
+101:             dists = np.sum((pts[:, None, :] - label_pts[None, :, :]) ** 2, axis=2)
+102:             closest_idx = np.argmin(dists, axis=1)
+103: 
+104:             for i, l in enumerate(labels):
+105:                 idx = l[0]
+106:                 sub_mask = np.zeros_like(core_mask, dtype=bool)
+107:                 sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+108:                 room_masks[idx] = sub_mask
+109: 
+110:     # 4b. Fallback: no OCR labels found (e.g. floor plans with circled numbers).
+111:     # Auto-generate one room seed per detected core component.
+112:     if not room_masks:
+113:         min_room_px = max(100, int(height * width * 0.005))
+114:         for cid in range(1, num_labels):
+115:             comp_pixels = (comp_map == cid)
+116:             if comp_pixels.sum() < min_room_px:
+117:                 continue
+118:             dist_comp = dist_smooth.copy()
+119:             dist_comp[~comp_pixels] = 0
+120:             peak = np.unravel_index(np.argmax(dist_comp), dist_comp.shape)
+121:             cy_auto, cx_auto = int(peak[0]), int(peak[1])
+122:             auto_idx = len(rooms_raw)
+123:             x3d, z3d = to_3d(cx_auto, cy_auto)
+124:             rooms_raw.append({"name": f"Room {cid}", "x": x3d, "z": z3d})
+125:             room_masks[auto_idx] = (region_map == cid)
+126: 
+127:     # Helper: two-phase expansion on the structural (furniture-free) free mask.
+128:     # Phase 1 finds tight vertical bounds along the seed column — single-pixel checks stop at walls.
+129:     # Phase 2 finds horizontal bounds with a full-height column check — a doorway column has wall
+130:     # pixels above/below the opening, so .all() returns False and expansion stops before bleeding.
+131:     def expand_two_phase(cx, cy):
+132:         # Phase 1: vertical from seed column
+133:         y1 = cy
+134:         while y1 > 0 and free[y1 - 1, cx] > 0:
+135:             y1 -= 1
+136:         y2 = cy
+137:         while y2 < height - 1 and free[y2 + 1, cx] > 0:
+138:             y2 += 1
+139: 
+140:         # Phase 2: horizontal with full-column check over [y1, y2]
+141:         x1 = cx
+142:         while x1 > 0 and free[y1:y2 + 1, x1 - 1].all():
+143:             x1 -= 1
+144:         x2 = cx
+145:         while x2 < width - 1 and free[y1:y2 + 1, x2 + 1].all():
+146:             x2 += 1
+147: 
+148:         if x2 - x1 < 4 or y2 - y1 < 4:
+149:             return None
+150:         return x1, y1, x2, y2
+151: 
+152:     expanded_dict = {}
+153: 
+154:     sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+155: 
+156:     for idx, room in sorted_rooms_with_indices:
+157:         sx, sy = to_px(room['x'], room['z'])
+158:         clean_name = "".join(c for c in room['name'] if c.isalnum())
+159: 
+160:         has_expanded = False
+161:         if idx in room_masks:
+162:             mask = room_masks[idx]
+163:             if not np.any(mask):
+164:                 expanded_dict[idx] = room
+165:                 continue
+166: 
+167:             # Prefer starting at the original label position if it's inside the mask and free
+168:             if mask[sy, sx] and free[sy, sx] != 0:
+169:                 cx, cy = sx, sy
+170:             else:
+171:                 M = cv2.moments(mask.astype(np.uint8))
+172:                 if M["m00"] != 0:
+173:                     cx = int(M["m10"] / M["m00"])
+174:                     cy = int(M["m01"] / M["m00"])
+175:                 else:
+176:                     cx, cy = sx, sy
+177: 
+178:                 if not mask[cy, cx]:
+179:                     ys, xs = np.where(mask)
+180:                     dists = (xs - cx) ** 2 + (ys - cy) ** 2
+181:                     min_idx = np.argmin(dists)
+182:                     cx, cy = xs[min_idx], ys[min_idx]
+183: 
+184:             debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+185:             debug_img[mask] = [0, 255, 0]
+186:             cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1)
+187: 
+188:             if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+189:                 rect = expand_two_phase(cx, cy)
+190:                 if rect:
+191:                     x1, y1, x2, y2 = rect
+192: 
+193:                     x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+194: 
+195:                     cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+196: 
+197:                     if x2 - x1 >= 4 and y2 - y1 >= 4:
+198:                         rx1, rz1 = to_3d(x1, y1)
+199:                         rx2, rz2 = to_3d(x2, y2)
+200:                         expanded_dict[idx] = {
+201:                             "name": room['name'],
+202:                             "x": room['x'], "z": room['z'],
+203:                             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+204:                             "polygon": [
+205:                                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+206:                                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+207:                             ],
+208:                         }
+209:                         cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+210:                         has_expanded = True
+211: 
+212:             if not has_expanded:
+213:                 cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+214: 
+215:         if not has_expanded:
+216:             expanded_dict[idx] = room
+217: 
+218:     expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+219:     return expanded
+220: 
+221: 
+222: 
+223: def _expand_rooms_v3(rooms_raw, wall_mask, wall_thickness, height, width):
+224:     """
+225:     v4 pipeline:
+226:     Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
+227:     while keeping the v4 debug logs.
+228:     """
+229:     from collections import deque, defaultdict
+230:     import numpy as np
+231:     import cv2
+232:     import os
+233:     
+234:     os.makedirs("uploads/debug", exist_ok=True)
+235:     
+236:     # 1. Debug Wall Mask
+237:     cv2.imwrite("uploads/debug/walls.png", wall_mask)
+238:     
+239:     aspect = height / width
+240:     
+241:     def to_px(nx, nz):
+242:         px = int((nx + 10) / 20 * width)
+243:         py = int((nz / aspect + 10) / 20 * height)
+244:         return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+245: 
+246:     def to_3d(px, py):
+247:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+248: 
+249:     # 1. Wall Extraction -> Free space
+250:     free = (wall_mask == 0).astype(np.uint8) * 255
+251:     
+252:     # 2. Room Extraction -> Distance Transform Cores
+253:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+254:     
+255:     # Senior Dev Fix: Smooth the distance transform to remove local noise.
+256:     dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+257:     
+258:     # Find local maxima (peaks of rooms)
+259:     local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
+260:     
+261:     # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
+262:     core_threshold = 2
+263:     cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+264:     cores = cv2.dilate(cores, np.ones((3,3)))
+265:     
+266:     # Debug: save cores to verify hallway is connected
+267:     cv2.imwrite("uploads/debug/room_cores.png", cores)
+268:     
+269:     num_labels, comp_map = cv2.connectedComponents(cores)
+270:     
+271:     # Core BFS to partition free space (Voronoi of cores)
+272:     queue = deque()
+273:     region_map = np.zeros_like(comp_map, dtype=np.int32)
+274:     
+275:     ys, xs = np.where(comp_map > 0)
+276:     for y, x in zip(ys, xs):
+277:         queue.append((x, y, comp_map[y, x]))
+278:         region_map[y, x] = comp_map[y, x]
+279:         
+280:     while queue:
+281:         x, y, cid = queue.popleft()
+282:         for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+283:             nx, ny = x + dx, y + dy
+284:             if 0 <= nx < width and 0 <= ny < height:
+285:                 if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+286:                     region_map[ny, nx] = cid
+287:                     queue.append((nx, ny, cid))
+288:                     
+289:     # 3. Label-to-Room Matching
+290:     core_to_labels = defaultdict(list)
+291:     for idx, room in enumerate(rooms_raw):
+292:         sx, sy = to_px(room['x'], room['z'])
+293:         cid = region_map[sy, sx]
+294:         
+295:         if cid == 0:
+296:             # OCR label landed on a wall or outside. Radial search for nearest region.
+297:             found = 0
+298:             for r in range(1, int(min(width, height) * 0.1), 2):
+299:                 y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+300:                 x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+301:                 roi = region_map[y_min:y_max+1, x_min:x_max+1]
+302:                 if np.any(roi > 0):
+303:                     ys_roi, xs_roi = np.where(roi > 0)
+304:                     ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+305:                     dists = (xs_global - sx)**2 + (ys_global - sy)**2
+306:                     min_idx = np.argmin(dists)
+307:                     found = region_map[ys_global[min_idx], xs_global[min_idx]]
+308:                     break
+309:             cid = found
+310:             
+311:         if cid > 0:
+312:             core_to_labels[cid].append((idx, sx, sy))
+313:             
+314:     # 4. Region Generation & Open-Plan Sub-partitioning
+315:     room_masks = {}
+316:     for cid, labels in core_to_labels.items():
+317:         core_mask = (region_map == cid)
+318:         if len(labels) == 1:
+319:             room_masks[labels[0][0]] = core_mask
+320:         else:
+321:             # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
+322:             ys, xs = np.where(core_mask)
+323:             pts = np.column_stack((xs, ys)) # (N, 2)
+324:             label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
+325:             # dists shape: (N, K)
+326:             dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
+327:             closest_idx = np.argmin(dists, axis=1)
+328:             
+329:             for i, l in enumerate(labels):
+330:                 idx = l[0]
+331:                 sub_mask = np.zeros_like(core_mask, dtype=bool)
+332:                 sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+333:                 room_masks[idx] = sub_mask
+334: 
+335:     # Helper: 4-way expansion (Frozen as requested)
+336:     def expand_from_point(cx, cy):
+337:         x1 = x2 = cx
+338:         y1 = y2 = cy
+339:         fl = fr = ft = fb = False
+340:         while not (fl and fr and ft and fb):
+341:             ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+342:             if not fl:
+343:                 if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+344:                 else: fl = True
+345:             if not fr:
+346:                 if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+347:                 else: fr = True
+348:             if not ft:
+349:                 if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+350:                 else: ft = True
+351:             if not fb:
+352:                 if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+353:                 else: fb = True
+354:             if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+355:         if x2 - x1 < 4 or y2 - y1 < 4: return None
+356:         return x1, y1, x2, y2
+357: 
+358:     expanded = []
+359: 
+360:     expanded_dict = {}
+361: 
+362:     # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
+363:     sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+364: 
+365:     # Debug: Overlay container
+366:     for idx, room in sorted_rooms_with_indices:
+367:         sx, sy = to_px(room['x'], room['z'])
+368:         clean_name = "".join(c for c in room['name'] if c.isalnum())
+369:         
+370:         has_expanded = False
+371:         if idx in room_masks:
+372:             mask = room_masks[idx]
+373:             if not np.any(mask):
+374:                 expanded_dict[idx] = room
+375:                 continue
+376:             
+377:             # Prefer starting at the original label position if it's inside the mask and free
+378:             if mask[sy, sx] and free[sy, sx] != 0:
+379:                 cx, cy = sx, sy
+380:             else:
+381:                 # Find centroid of this specific room's region
+382:                 M = cv2.moments(mask.astype(np.uint8))
+383:                 if M["m00"] != 0:
+384:                     cx = int(M["m10"] / M["m00"])
+385:                     cy = int(M["m01"] / M["m00"])
+386:                 else:
+387:                     cx, cy = sx, sy
+388:                     
+389:                 # If centroid is outside the mask, snap to nearest pixel IN mask
+390:                 if not mask[cy, cx]:
+391:                     ys, xs = np.where(mask)
+392:                     dists = (xs - cx)**2 + (ys - cy)**2
+393:                     min_idx = np.argmin(dists)
+394:                     cx, cy = xs[min_idx], ys[min_idx]
+395:                 
+396:             # DEBUG IMAGE: Overlay
+397:             debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+398:             debug_img[mask] = [0, 255, 0] # Green mask
+399:             cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
+400:             
+401:             if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+402:                 rect = expand_from_point(cx, cy)
+403:                 if rect:
+404:                     x1, y1, x2, y2 = rect
+405:                     
+406:                     # Mark the expanded region as occupied in the free mask to prevent overlap
+407:                     free[y1:y2+1, x1:x2+1] = 0
+408:                     
+409:                     x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+410:                     
+411:                     # Debug: draw rectangle
+412:                     cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
+413:                     
+414:                     if x2 - x1 >= 4 and y2 - y1 >= 4:
+415:                         rx1, rz1 = to_3d(x1, y1)
+416:                         rx2, rz2 = to_3d(x2, y2)
+417:                         expanded_dict[idx] = {
+418:                             "name": room['name'],
+419:                             "x": room['x'], "z": room['z'],
+420:                             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+421:                             "polygon": [
+422:                                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+423:                                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+424:                             ],
+425:                         }
+426:                         cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+427:                         has_expanded = True
+428:                         
+429:             if not has_expanded:
+430:                 cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+431:                 
+432:         if not has_expanded:
+433:             expanded_dict[idx] = room
+434:             
+435:     # Reconstruct the expanded list in the original order of rooms_raw
+436:     expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+437:     return expanded
+438: 
+439: 
+440: def _expand_rooms_v2(rooms_raw, wall_mask, wall_thickness, height, width):
+441:     from collections import deque, defaultdict
+442:     import numpy as np
+443:     
+444:     aspect = height / width
+445:     
+446:     def to_px(nx, nz):
+447:         px = int((nx + 10) / 20 * width)
+448:         py = int((nz / aspect + 10) / 20 * height)
+449:         return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+450: 
+451:     def to_3d(px, py):
+452:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+453: 
+454:     # 1. Wall Extraction -> Free space
+455:     free = (wall_mask == 0).astype(np.uint8) * 255
+456:     
+457:     # 2. Room Extraction -> Distance Transform Cores
+458:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+459:     
+460:     # Find local maxima (peaks of rooms)
+461:     local_max = cv2.dilate(dist, np.ones((7,7)))
+462:     
+463:     # FIX: Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
+464:     # Fake cores are harmless now because they will naturally merge into the closest label's mask.
+465:     core_threshold = 2
+466:     cores = ((dist == local_max) & (dist > core_threshold)).astype(np.uint8) * 255
+467:     cores = cv2.dilate(cores, np.ones((3,3)))
+468:     
+469:     num_labels, comp_map = cv2.connectedComponents(cores)
+470:     
+471:     # Core BFS to partition free space (Voronoi of cores)
+472:     queue = deque()
+473:     region_map = np.zeros_like(comp_map, dtype=np.int32)
+474:     
+475:     ys, xs = np.where(comp_map > 0)
+476:     for y, x in zip(ys, xs):
+477:         queue.append((x, y, comp_map[y, x]))
+478:         region_map[y, x] = comp_map[y, x]
+479:         
+480:     while queue:
+481:         x, y, cid = queue.popleft()
+482:         for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+483:             nx, ny = x + dx, y + dy
+484:             if 0 <= nx < width and 0 <= ny < height:
+485:                 if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+486:                     region_map[ny, nx] = cid
+487:                     queue.append((nx, ny, cid))
+488:                     
+489:     # 3. Label-to-Room Matching
+490:     # To robustly avoid fake cores and handle labels placed near boundaries/walls,
+491:     # we use a "Core chooses nearest Label" approach. Every core votes for its closest OCR label.
+492:     core_to_label = {}
+493:     
+494:     # Precompute core centroids
+495:     core_centroids = {}
+496:     for cid in range(1, num_labels):
+497:         M = cv2.moments((comp_map == cid).astype(np.uint8))
+498:         if M["m00"] != 0:
+499:             core_centroids[cid] = (int(M["m10"]/M["m00"]), int(M["m01"]/M["m00"]))
+500:             
+501:     for cid, (cx, cy) in core_centroids.items():
+502:         best_idx = None
+503:         min_dist = float('inf')
+504:         for idx, room in enumerate(rooms_raw):
+505:             sx, sy = to_px(room['x'], room['z'])
+506:             d = (cx - sx)**2 + (cy - sy)**2
+507:             if d < min_dist:
+508:                 min_dist = d
+509:                 best_idx = idx
+510:         if best_idx is not None:
+511:             core_to_label[cid] = best_idx
+512:             
+513:     # 4. Region Generation
+514:     room_masks = {}
+515:     for idx in range(len(rooms_raw)):
+516:         mask = np.zeros((height, width), dtype=bool)
+517:         for cid, label_idx in core_to_label.items():
+518:             if label_idx == idx:
+519:                 mask |= (region_map == cid)
+520:                 
+521:         # Fallback: if a label got NO cores (e.g. tiny closet whose peak < 2),
+522:         # assign it the region it physically lands in, to ensure it gets some mask.
+523:         if not np.any(mask):
+524:             sx, sy = to_px(rooms_raw[idx]['x'], rooms_raw[idx]['z'])
+525:             fallback_cid = region_map[sy, sx]
+526:             if fallback_cid == 0:
+527:                 # Radial search for nearest region if on a wall
+528:                 for r in range(1, int(min(width, height) * 0.1), 2):
+529:                     y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+530:                     x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+531:                     roi = region_map[y_min:y_max+1, x_min:x_max+1]
+532:                     if np.any(roi > 0):
+533:                         ys_roi, xs_roi = np.where(roi > 0)
+534:                         ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+535:                         dists = (xs_global - sx)**2 + (ys_global - sy)**2
+536:                         min_idx = np.argmin(dists)
+537:                         fallback_cid = region_map[ys_global[min_idx], xs_global[min_idx]]
+538:                         break
+539:             if fallback_cid > 0:
+540:                 mask = (region_map == fallback_cid)
+541:                 
+542:         if np.any(mask):
+543:             room_masks[idx] = mask
+544: 
+545:     # Helper: 4-way expansion (Frozen as requested)
+546:     def expand_from_point(cx, cy):
+547:         x1 = x2 = cx
+548:         y1 = y2 = cy
+549:         fl = fr = ft = fb = False
+550:         while not (fl and fr and ft and fb):
+551:             ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+552:             if not fl:
+553:                 if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+554:                 else: fl = True
+555:             if not fr:
+556:                 if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+557:                 else: fr = True
+558:             if not ft:
+559:                 if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+560:                 else: ft = True
+561:             if not fb:
+562:                 if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+563:                 else: fb = True
+564:             if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+565:         if x2 - x1 < 4 or y2 - y1 < 4: return None
+566:         return x1, y1, x2, y2
+567: 
+568:     expanded = []
+569:     
+570:     expanded_dict = {}
+571:     
+572:     # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
+573:     sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+574:     
+575:     for idx, room in sorted_rooms_with_indices:
+576:         sx, sy = to_px(room['x'], room['z'])
+577:         
+578:         has_expanded = False
+579:         if idx in room_masks:
+580:             mask = room_masks[idx]
+581:             # Prefer starting at the original label position if it's inside the mask and free
+582:             if mask[sy, sx] and free[sy, sx] != 0:
+583:                 cx, cy = sx, sy
+584:             else:
+585:                 # Find centroid of this specific room's region
+586:                 M = cv2.moments(mask.astype(np.uint8))
+587:                 if M["m00"] != 0:
+588:                     cx = int(M["m10"] / M["m00"])
+589:                     cy = int(M["m01"] / M["m00"])
+590:                 else:
+591:                     cx, cy = sx, sy
+592:                     
+593:                 # If centroid is outside the mask (e.g. L-shaped room), snap to nearest pixel IN mask
+594:                 if not mask[cy, cx]:
+595:                     ys, xs = np.where(mask)
+596:                     dists = (xs - cx)**2 + (ys - cy)**2
+597:                     min_idx = np.argmin(dists)
+598:                     cx, cy = xs[min_idx], ys[min_idx]
+599:                 
+600:             if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+601:                 rect = expand_from_point(cx, cy)
+602:                 if rect:
+603:                     x1, y1, x2, y2 = rect
+604:                     
+605:                     # Mark the expanded region as occupied in the free mask to prevent overlap
+606:                     free[y1:y2+1, x1:x2+1] = 0
+607:                     
+608:                     x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+609:                     if x2 - x1 >= 4 and y2 - y1 >= 4:
+610:                         rx1, rz1 = to_3d(x1, y1)
+611:                         rx2, rz2 = to_3d(x2, y2)
+612:                         expanded_dict[idx] = {
+613:                             "name": room['name'],
+614:                             "x": room['x'], "z": room['z'],
+615:                             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+616:                             "polygon": [
+617:                                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+618:                                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+619:                             ],
+620:                         }
+621:                         has_expanded = True
+622:                         
+623:         if not has_expanded:
+624:             expanded_dict[idx] = room
+625:             
+626:     # Reconstruct the expanded list in the original order of rooms_raw
+627:     expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+628:     return expanded
+629: 
+630: 
+631: 
+The above content shows the entire, complete file contents of the requested file.
+
+
+---NEXT---
+
+Created At: 2026-06-26T10:37:31+05:30
+Completed At: 2026-06-26T10:37:32+05:30
+File Path: `file:///C:/Users/Mehak/OneDrive/Desktop/Floor%20to%203D/floor_to_3d/backend/do_refactor.py`
+Total Lines: 355
+Total Bytes: 13127
+Showing lines 1 to 355
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import os
+2: 
+3: def write_file(path, content):
+4:     os.makedirs(os.path.dirname(path), exist_ok=True)
+5:     with open(path, "w", encoding="utf-8") as f:
+6:         f.write(content)
+7: 
+8: config_code = """import os
+9: 
+10: PIPELINE_VERSION = 'v4'
+11: SECRET_KEY = "archtransform_super_secret_key_123"
+12: ALGORITHM = "HS256"
+13: MONGO_URI = "mongodb+srv://rahul210092004_db_user:cU9fjaqlNbXBywY6@cluster0.5xfir9p.mongodb.net/?appName=Cluster0"
+14: """
+15: 
+16: database_code = """from motor.motor_asyncio import AsyncIOMotorClient
+17: from app.core.config import MONGO_URI
+18: 
+19: client = AsyncIOMotorClient(MONGO_URI)
+20: db = client.floor23d
+21: users_collection = db.users
+22: projects_collection = db.projects
+23: """
+24: 
+25: security_code = """import jwt
+26: from datetime import datetime, timedelta
+27: from fastapi import Header, HTTPException
+28: from app.core.config import SECRET_KEY, ALGORITHM
+29: 
+30: def create_access_token(data: dict):
+31:     to_encode = data.copy()
+32:     expire = datetime.utcnow() + timedelta(days=7)
+33:     to_encode.update({"exp": expire})
+34:     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+35: 
+36: def get_current_user(authorization: str = Header(None)):
+37:     if not authorization or not authorization.startswith("Bearer "):
+38:         raise HTTPException(status_code=401, detail="Missing or invalid token")
+39:     token = authorization.split(" ")[1]
+40:     try:
+41:         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+42:         return payload["sub"]
+43:     except Exception:
+44:         raise HTTPException(status_code=401, detail="Invalid or expired token")
+45: 
+46: def get_current_user_optional(authorization: str = Header(None)):
+47:     if not authorization or not authorization.startswith("Bearer "):
+48:         return None
+49:     token = authorization.split(" ")[1]
+50:     try:
+51:         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+52:         return payload["sub"]
+53:     except Exception:
+54:         return None
+55: """
+56: 
+57: auth_code = """import bcrypt
+58: from fastapi import APIRouter, HTTPException
+59: from pydantic import BaseModel
+60: from app.core.database import users_collection
+61: from app.core.security import create_access_token
+62: 
+63: router = APIRouter(prefix="/auth", tags=["auth"])
+64: 
+65: class UserSignup(BaseModel):
+66:     email: str
+67:     username: str
+68:     password: str
+69: 
+70: class UserLogin(BaseModel):
+71:     username: str
+72:     password: str
+73: 
+74: @router.post("/signup")
+75: async def signup(user: UserSignup):
+76:     normalized_username = user.username.lower()
+77:     normalized_email = user.email.lower()
+78: 
+79:     db_user = await users_collection.find_one({"username": normalized_username})
+80:     if db_user:
+81:         raise HTTPException(status_code=400, detail="Username already exists")
+82:     db_email = await users_collection.find_one({"email": normalized_email})
+83:     if db_email:
+84:         raise HTTPException(status_code=400, detail="Email already registered")
+85:         
+86:     hashed_password = bcrypt.hashpw(user.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+87:     new_user = {"email": normalized_email, "username": normalized_username, "password": hashed_password}
+88:     result = await users_collection.insert_one(new_user)
+89:     
+90:     user_id_str = str(result.inserted_id)
+91:     token = create_access_token({"sub": user_id_str})
+92:     return {"success": True, "token": token, "user_id": user_id_str, "username": normalized_username}
+93: 
+94: @router.post("/login")
+95: async def login(user: UserLogin):
+96:     normalized_username = user.username.lower()
+97:     db_user = await users_collection.find_one({
+98:         "$or": [
+99:             {"username": normalized_username},
+100:             {"email": normalized_username}
+101:         ]
+102:     })
+103:     if not db_user:
+104:         raise HTTPException(status_code=401, detail="Invalid credentials")
+105:     
+106:     if not bcrypt.checkpw(user.password.encode('utf-8'), db_user["password"].encode('utf-8')):
+107:         raise HTTPException(status_code=401, detail="Invalid credentials")
+108:         
+109:     user_id_str = str(db_user["_id"])
+110:     token = create_access_token({"sub": user_id_str})
+111:     return {"success": True, "token": token, "user_id": user_id_str, "username": user.username}
+112: 
+113: @router.post("/logout")
+114: async def logout():
+115:     return {"success": True}
+116: """
+117: 
+118: projects_code = """import time
+119: from typing import Optional
+120: from fastapi import APIRouter, Depends, HTTPException
+121: from pydantic import BaseModel
+122: from bson import ObjectId
+123: from app.core.database import projects_collection
+124: from app.core.security import get_current_user
+125: 
+126: router = APIRouter(prefix="/projects", tags=["projects"])
+127: 
+128: class ProjectSave(BaseModel):
+129:     user_id: str
+130:     project_id: Optional[str] = None
+131:     name: str
+132:     rawBackendData: list
+133:     settings: Optional[dict] = None
+134: 
+135: @router.post("/save")
+136: async def save_project(proj: ProjectSave, current_user: str = Depends(get_current_user)):
+137:     if proj.user_id != current_user:
+138:         raise HTTPException(status_code=403, detail="Not authorized to save for this user")
+139: 
+140:     project_data = {
+141:         "user_id": proj.user_id,
+142:         "name": proj.name,
+143:         "rawBackendData": proj.rawBackendData,
+144:         "settings": proj.settings or {},
+145:         "lastModified": time.time()
+146:     }
+147:     
+148:     if proj.project_id:
+149:         await projects_collection.update_one(
+150:             {"_id": ObjectId(proj.project_id)},
+151:             {"$set": project_data}
+152:         )
+153:         return {"project_id": proj.project_id}
+154:     else:
+155:         result = await projects_collection.insert_one(project_data)
+156:         return {"project_id": str(result.inserted_id)}
+157: 
+158: @router.get("/{user_id}")
+159: async def get_projects(user_id: str, current_user: str = Depends(get_current_user)):
+160:     if user_id != current_user:
+161:         raise HTTPException(status_code=403, detail="Not authorized to view these projects")
+162:         
+163:     cursor = projects_collection.find({"user_id": user_id}).sort("lastModified", -1)
+164:     projects = []
+165:     async for p in cursor:
+166:         projects.append({
+167:             "project_id": str(p["_id"]),
+168:             "name": p.get("name", "Untitled Project"),
+169:             "rawBackendData": p.get("rawBackendData", []),
+170:             "settings": p.get("settings", {}),
+171:             "lastModified": p.get("lastModified", 0)
+172:         })
+173:     return {"projects": projects}
+174: 
+175: @router.patch("/{project_id}/rename")
+176: async def rename_project(project_id: str, body: dict, current_user: str = Depends(get_current_user)):
+177:     project = await projects_collection.find_one({"_id": ObjectId(project_id)})
+178:     if not project:
+179:         raise HTTPException(status_code=404, detail="Project not found")
+180:     if project.get("user_id") != current_user:
+181:         raise HTTPException(status_code=403, detail="Not authorized to rename this project")
+182:     new_name = body.get("name", "").strip()
+183:     if not new_name:
+184:         raise HTTPException(status_code=400, detail="Name cannot be empty")
+185:     await projects_collection.update_one(
+186:         {"_id": ObjectId(project_id)},
+187:         {"$set": {"name": new_name, "lastModified": time.time()}}
+188:     )
+189:     return {"renamed": True}
+190: 
+191: @router.delete("/{project_id}")
+192: async def delete_project(project_id: str, current_user: str = Depends(get_current_user)):
+193:     project = await projects_collection.find_one({"_id": ObjectId(project_id)})
+194:     if not project:
+195:         raise HTTPException(status_code=404, detail="Project not found")
+196:     if project.get("user_id") != current_user:
+197:         raise HTTPException(status_code=403, detail="Not authorized to delete this project")
+198:     await projects_collection.delete_one({"_id": ObjectId(project_id)})
+199:     return {"deleted": True}
+200: """
+201: 
+202: # I will extract the algorithms from the original main.py
+203: with open("main.py", "r", encoding="utf-8") as f:
+204:     main_content = f.read()
+205: 
+206: import re
+207: 
+208: # Extract _extract_rooms
+209: extract_rooms_match = re.search(r"def _extract_rooms\(.*?\n\n\n", main_content, re.DOTALL)
+210: extract_rooms_code = extract_rooms_match.group(0) if extract_rooms_match else ""
+211: 
+212: # Extract _expand_rooms_v1
+213: v1_match = re.search(r"def _expand_rooms_v1\(.*?\n\ndef _expand", main_content, re.DOTALL)
+214: v1_code = v1_match.group(0).replace("def _expand", "") if v1_match else ""
+215: 
+216: # Extract _expand_rooms_v4
+217: v4_match = re.search(r"def _expand_rooms_v4\(.*?\n\ndef _expand", main_content, re.DOTALL)
+218: v4_code = v4_match.group(0).replace("def _expand", "") if v4_match else ""
+219: 
+220: # Extract _expand_rooms_v3
+221: v3_match = re.search(r"def _expand_rooms_v3\(.*?\n\ndef process_image", main_content, re.DOTALL)
+222: v3_code = v3_match.group(0).replace("def process_image", "") if v3_match else ""
+223: 
+224: # Extract process_image
+225: process_image_match = re.search(r"def process_image\(.*?\n\n@app", main_content, re.DOTALL)
+226: process_image_code = process_image_match.group(0).replace("@app", "") if process_image_match else ""
+227: 
+228: # Replace imports in pipeline
+229: pipeline_imports = "import cv2\nimport numpy as np\nimport math\nfrom app.core.config import PIPELINE_VERSION\nfrom app.services.vision.algorithms import _expand_rooms_v1, _expand_rooms_v3, _expand_rooms_v4\nfrom app.services.vision.core import _extract_rooms\n\n"
+230: 
+231: # In main.py the reader was global
+232: core_imports = "import re\nimport easyocr\nreader = easyocr.Reader(['en'], gpu=False, verbose=False)\n\n"
+233: 
+234: # Write vision/core.py
+235: write_file("app/services/vision/core.py", core_imports + extract_rooms_code)
+236: 
+237: # Write vision/algorithms.py
+238: algorithms_imports = "import cv2\nimport os\n"
+239: write_file("app/services/vision/algorithms.py", algorithms_imports + v1_code + v4_code + v3_code)
+240: 
+241: # Write vision/pipeline.py
+242: write_file("app/services/vision/pipeline.py", pipeline_imports + process_image_code)
+243: 
+244: upload_code = """import os
+245: import time
+246: import fitz
+247: from typing import List
+248: from fastapi import APIRouter, File, UploadFile, HTTPException
+249: from app.services.vision.pipeline import process_image
+250: 
+251: router = APIRouter(prefix="/upload", tags=["upload"])
+252: 
+253: @router.post("/")
+254: async def upload_files(files: List[UploadFile] = File(...)):
+255:     os.makedirs("uploads", exist_ok=True)
+256:     results = []
+257:     last_error = "unknown"
+258: 
+259:     for file_idx, file in enumerate(files):
+260:         contents = await file.read()
+261:         try:
+262:             if file.filename.lower().endswith(".pdf"):
+263:                 doc = fitz.open(stream=contents, filetype="pdf")
+264:                 if len(doc) == 0:
+265:                     continue
+266:                 for page_idx in range(len(doc)):
+267:                     page     = doc.load_page(page_idx)
+268:                     pix      = page.get_pixmap(dpi=150)
+269:                     img_bytes = pix.tobytes("png")
+270:                     fname    = f"floor_pdf_{file_idx}_{page_idx}_{int(time.time()*1000)}.png"
+271:                     fpath    = f"uploads/{fname}"
+272:                     with open(fpath, "wb") as f:
+273:                         f.write(img_bytes)
+274:                     walls, rooms, w, h = process_image(img_bytes)
+275:                     results.append({
+276:                         "walls": walls, "rooms": rooms,
+277:                         "imageUrl": f"/{fpath}?t={time.time()}",
+278:                         "width": w, "height": h,
+279:                     })
+280:             else:
+281:                 fname = f"floor_img_{file_idx}_{int(time.time()*1000)}.png"
+282:                 fpath = f"uploads/{fname}"
+283:                 with open(fpath, "wb") as f:
+284:                     f.write(contents)
+285:                 walls, rooms, w, h = process_image(contents)
+286:                 results.append({
+287:                     "walls": walls, "rooms": rooms,
+288:                     "imageUrl": f"/{fpath}?t={time.time()}",
+289:                     "width": w, "height": h,
+290:                 })
+291:         except Exception as e:
+292:             import traceback
+293:             err_detail = traceback.format_exc()
+294:             print(f"[ERROR] processing {file.filename}: {err_detail}")
+295:             last_error = str(e)
+296:             continue
+297: 
+298:     if not results:
+299:         raise HTTPException(
+300:             status_code=400,
+301:             detail=f"Could not process any floors. Last error: {last_error}"
+302:         )
+303: 
+304:     return {"floors": results}
+305: """
+306: 
+307: main_app_code = """import os
+308: from fastapi import FastAPI
+309: from fastapi.staticfiles import StaticFiles
+310: from fastapi.middleware.cors import CORSMiddleware
+311: 
+312: from app.api.routes import auth, projects, upload
+313: 
+314: # Create uploads dir if it doesn't exist
+315: os.makedirs("uploads/debug", exist_ok=True)
+316: 
+317: app = FastAPI(title="ArchTransform API")
+318: 
+319: app.add_middleware(
+320:     CORSMiddleware,
+321:     allow_origins=["*"],
+322:     allow_credentials=True,
+323:     allow_methods=["*"],
+324:     allow_headers=["*"],
+325: )
+326: 
+327: app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+328: 
+329: app.include_router(auth.router)
+330: app.include_router(projects.router)
+331: app.include_router(upload.router)
+332: 
+333: @app.get("/")
+334: async def root():
+335:     return {"message": "ArchTransform API is running professionally modularized!"}
+336: """
+337: 
+338: write_file("app/core/config.py", config_code)
+339: write_file("app/core/database.py", database_code)
+340: write_file("app/core/security.py", security_code)
+341: write_file("app/api/routes/auth.py", auth_code)
+342: write_file("app/api/routes/projects.py", projects_code)
+343: write_file("app/api/routes/upload.py", upload_code)
+344: write_file("app/main.py", main_app_code)
+345: 
+346: # create __init__.py files
+347: write_file("app/__init__.py", "")
+348: write_file("app/core/__init__.py", "")
+349: write_file("app/api/__init__.py", "")
+350: write_file("app/api/routes/__init__.py", "")
+351: write_file("app/services/__init__.py", "")
+352: write_file("app/services/vision/__init__.py", "")
+353: 
+354: print("Refactoring complete.")
+355: 
+The above content shows the entire, complete file contents of the requested file.
+
+
+---NEXT---
+
+Created At: 2026-06-26T10:40:02+05:30
+Completed At: 2026-06-26T10:40:02+05:30
+The following changes were made by the replace_file_content tool to: C:\Users\Mehak\OneDrive\Desktop\Floor to 3D\floor_to_3d\backend\app\services\vision\algorithms.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -1,220 +1,218 @@
+ import cv2
+ import os
+-def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width, structural_mask=None):
+-    """
+-    v4 pipeline:
+-    Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
+-    while keeping the v4 debug logs.
+-    """
+-    from collections import deque, defaultdict
+-    import numpy as np
+-    import cv2
+-    import os
+-
+-    os.makedirs("uploads/debug", exist_ok=True)
+-
+-    cv2.imwrite("uploads/debug/walls.png", wall_mask)
+-
+-    aspect = height / width
+-
+-    def to_px(nx, nz):
+-        px = int((nx + 10) / 20 * width)
+-        py = int((nz / aspect + 10) / 20 * height)
+-        return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+-
+-    def to_3d(px, py):
+-        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+-
+-    # Use structural_mask (pre-CLOSE, furniture-free) when available.
+-    # This prevents furniture outlines thickened by MORPH_CLOSE from fragmenting free space.
+-    mask_for_free = structural_mask if structural_mask is not None else wall_mask
+-    free = (mask_for_free == 0).astype(np.uint8) * 255
+-    cv2.imwrite("uploads/debug/struct_free.png", free)
+-
+-    # 2. Room Extraction -> Distance Transform Cores
+-    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+-    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+-    local_max = cv2.dilate(dist_smooth, np.ones((7, 7)))
+-    core_threshold = 2
+-    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+-    cores = cv2.dilate(cores, np.ones((3, 3)))
+-
+-    cv2.imwrite("uploads/debug/room_cores.png", cores)
+-
+-    num_labels, comp_map = cv2.connectedComponents(cores)
+-
+-    # Core BFS to partition free space (Voronoi of cores)
+-    queue = deque()
+-    region_map = np.zeros_like(comp_map, dtype=np.int32)
+-
+-    ys, xs = np.where(comp_map > 0)
+-    for y, x in zip(ys, xs):
+-        queue.append((x, y, comp_map[y, x]))
+-        region_map[y, x] = comp_map[y, x]
+-
+-    while queue:
+-        x, y, cid = queue.popleft()
+-        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+-            nx, ny = x + dx, y + dy
+-            if 0 <= nx < width and 0 <= ny < height:
+-                if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+-                    region_map[ny, nx] = cid
+-                    queue.append((nx, ny, cid))
+-
+-    # 3. Label-to-Room Matching
+-    rooms_raw = list(rooms_raw)
+-    core_to_labels = defaultdict(list)
+-    for idx, room in enumerate(rooms_raw):
+-        sx, sy = to_px(room['x'], room['z'])
+-        cid = region_map[sy, sx]
+-
+-        if cid == 0:
+-            # OCR label landed on a wall or outside. Radial search for nearest region.
+-            found = 0
+-            for r in range(1, int(min(width, height) * 0.1), 2):
+-                y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+-                x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+-                roi = region_map[y_min:y_max + 1, x_min:x_max + 1]
+-                if np.any(roi > 0):
+-                    ys_roi, xs_roi = np.where(roi > 0)
+-                    ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+-                    dists = (xs_global - sx) ** 2 + (ys_global - sy) ** 2
+-                    min_idx = np.argmin(dists)
+-                    found = region_map[ys_global[min_idx], xs_global[min_idx]]
+-                    break
+-            cid = found
+-
+-        if cid > 0:
+-            core_to_labels[cid].append((idx, sx, sy))
+-
+-    # 4. Region Generation & Open-Plan Sub-partitioning
+-    room_masks = {}
+-    for cid, labels in core_to_labels.items():
+-        core_mask = (region_map == cid)
+-        if len(labels) == 1:
+-            room_masks[labels[0][0]] = core_mask
+-        else:
+-            # Multiple labels in one region (Open Plan) -> Sub-partition using Voronoi
+-            ys, xs = np.where(core_mask)
+-            pts = np.column_stack((xs, ys))
+-            label_pts = np.array([[l[1], l[2]] for l in labels])
+-            dists = np.sum((pts[:, None, :] - label_pts[None, :, :]) ** 2, axis=2)
+-            closest_idx = np.argmin(dists, axis=1)
+-
+-            for i, l in enumerate(labels):
+-                idx = l[0]
+-                sub_mask = np.zeros_like(core_mask, dtype=bool)
+-                sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+-                room_masks[idx] = sub_mask
+-
+-    # 4b. Fallback: no OCR labels found (e.g. floor plans with circled numbers).
+-    # Auto-generate one room seed per detected core component.
+-    if not room_masks:
+-        min_room_px = max(100, int(height * width * 0.005))
+-        for cid in range(1, num_labels):
+-            comp_pixels = (comp_map == cid)
+-            if comp_pixels.sum() < min_room_px:
+-                continue
+-            dist_comp = dist_smooth.copy()
+-            dist_comp[~comp_pixels] = 0
+-            peak = np.unravel_index(np.argmax(dist_comp), dist_comp.shape)
+-            cy_auto, cx_auto = int(peak[0]), int(peak[1])
+-            auto_idx = len(rooms_raw)
+-            x3d, z3d = to_3d(cx_auto, cy_auto)
+-            rooms_raw.append({"name": f"Room {cid}", "x": x3d, "z": z3d})
+-            room_masks[auto_idx] = (region_map == cid)
+-
+-    # Helper: two-phase expansion on the structural (furniture-free) free mask.
+-    # Phase 1 finds tight vertical bounds along the seed column — single-pixel checks stop at walls.
+-    # Phase 2 finds horizontal bounds with a full-height column check — a doorway column has wall
+-    # pixels above/below the opening, so .all() returns False and expansion stops before bleeding.
+-    def expand_two_phase(cx, cy):
+-        # Phase 1: vertical from seed column
+-        y1 = cy
+-        while y1 > 0 and free[y1 - 1, cx] > 0:
+-            y1 -= 1
+-        y2 = cy
+-        while y2 < height - 1 and free[y2 + 1, cx] > 0:
+-            y2 += 1
+-
+-        # Phase 2: horizontal with full-column check over [y1, y2]
+-        x1 = cx
+-        while x1 > 0 and free[y1:y2 + 1, x1 - 1].all():
+-            x1 -= 1
+-        x2 = cx
+-        while x2 < width - 1 and free[y1:y2 + 1, x2 + 1].all():
+-            x2 += 1
+-
+-        if x2 - x1 < 4 or y2 - y1 < 4:
+-            return None
+-        return x1, y1, x2, y2
+-
+-    expanded_dict = {}
+-
+-    sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+-
+-    for idx, room in sorted_rooms_with_indices:
+-        sx, sy = to_px(room['x'], room['z'])
+-        clean_name = "".join(c for c in room['name'] if c.isalnum())
+-
+-        has_expanded = False
+-        if idx in room_masks:
+-            mask = room_masks[idx]
+-            if not np.any(mask):
+-                expanded_dict[idx] = room
+-                continue
+-
+-            # Prefer starting at the original label position if it's inside the mask and free
+-            if mask[sy, sx] and free[sy, sx] != 0:
+-                cx, cy = sx, sy
+-            else:
+-                M = cv2.moments(mask.astype(np.uint8))
+-                if M["m00"] != 0:
+-                    cx = int(M["m10"] / M["m00"])
+-                    cy = int(M["m01"] / M["m00"])
+-                else:
+-                    cx, cy = sx, sy
+-
+-                if not mask[cy, cx]:
+-                    ys, xs = np.where(mask)
+-                    dists = (xs - cx) ** 2 + (ys - cy) ** 2
+-                    min_idx = np.argmin(dists)
+-                    cx, cy = xs[min_idx], ys[min_idx]
+-
+-            debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+-            debug_img[mask] = [0, 255, 0]
+-            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1)
+-
+-            if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+-                rect = expand_two_phase(cx, cy)
+-                if rect:
+-                    x1, y1, x2, y2 = rect
+-
+-                    x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+-
+-                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+-
+-                    if x2 - x1 >= 4 and y2 - y1 >= 4:
+-                        rx1, rz1 = to_3d(x1, y1)
+-                        rx2, rz2 = to_3d(x2, y2)
+-                        expanded_dict[idx] = {
+-                            "name": room['name'],
+-                            "x": room['x'], "z": room['z'],
+-                            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+-                            "polygon": [
+-                                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+-                                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+-                            ],
+-                        }
+-                        cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+-                        has_expanded = True
+-
+-            if not has_expanded:
+-                cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+-
+-        if not has_expanded:
+-            expanded_dict[idx] = room
+-
++def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
++    """
++    v4 pipeline:
++    Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
++    while keeping the v4 debug logs.
++    """
++    from collections import deque, defaultdict
++    import numpy as np
++    import cv2
++    import os
++    
++    os.makedirs("uploads/debug", exist_ok=True)
++    
++    # 1. Debug Wall Mask
++    cv2.imwrite("uploads/debug/walls.png", wall_mask)
++    
++    aspect = height / width
++    
++    def to_px(nx, nz):
++        px = int((nx + 10) / 20 * width)
++        py = int((nz / aspect + 10) / 20 * height)
++        return max(0, min(width - 1, px)), max(0, min(height - 1, py))
++
++    def to_3d(px, py):
++        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
++
++    # 1. Wall Extraction -> Free space
++    free = (wall_mask == 0).astype(np.uint8) * 255
++    
++    # 2. Room Extraction -> Distance Transform Cores
++    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
++    
++    # Senior Dev Fix: Smooth the distance transform to remove local noise.
++    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
++    
++    # Find local maxima (peaks of rooms)
++    local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
++    
++    # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
++    core_threshold = 2
++    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
++    cores = cv2.dilate(cores, np.ones((3,3)))
++    
++    # Debug: save cores to verify hallway is connected
++    cv2.imwrite("uploads/debug/room_cores.png", cores)
++    
++    num_labels, comp_map = cv2.connectedComponents(cores)
++    
++    # Core BFS to partition free space (Voronoi of cores)
++    queue = deque()
++    region_map = np.zeros_like(comp_map, dtype=np.int32)
++    
++    ys, xs = np.where(comp_map > 0)
++    for y, x in zip(ys, xs):
++        queue.append((x, y, comp_map[y, x]))
++        region_map[y, x] = comp_map[y, x]
++        
++    while queue:
++        x, y, cid = queue.popleft()
++        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
++            nx, ny = x + dx, y + dy
++            if 0 <= nx < width and 0 <= ny < height:
++                if free[ny, nx] > 0 and region_map[ny, nx] == 0:
++                    region_map[ny, nx] = cid
++                    queue.append((nx, ny, cid))
++                    
++    # 3. Label-to-Room Matching
++    core_to_labels = defaultdict(list)
++    for idx, room in enumerate(rooms_raw):
++        sx, sy = to_px(room['x'], room['z'])
++        cid = region_map[sy, sx]
++        
++        if cid == 0:
++            # OCR label landed on a wall or outside. Radial search for nearest region.
++            found = 0
++            for r in range(1, int(min(width, height) * 0.1), 2):
++                y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
++                x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
++                roi = region_map[y_min:y_max+1, x_min:x_max+1]
++                if np.any(roi > 0):
++                    ys_roi, xs_roi = np.where(roi > 0)
++                    ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
++                    dists = (xs_global - sx)**2 + (ys_global - sy)**2
++                    min_idx = np.argmin(dists)
++                    found = region_map[ys_global[min_idx], xs_global[min_idx]]
++                    break
++            cid = found
++            
++        if cid > 0:
++            core_to_labels[cid].append((idx, sx, sy))
++            
++    # 4. Region Generation & Open-Plan Sub-partitioning
++    room_masks = {}
++    for cid, labels in core_to_labels.items():
++        core_mask = (region_map == cid)
++        if len(labels) == 1:
++            room_masks[labels[0][0]] = core_mask
++        else:
++            # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
++            ys, xs = np.where(core_mask)
++            pts = np.column_stack((xs, ys)) # (N, 2)
++            label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
++            # dists shape: (N, K)
++            dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
++            closest_idx = np.argmin(dists, axis=1)
++            
++            for i, l in enumerate(labels):
++                idx = l[0]
++                sub_mask = np.zeros_like(core_mask, dtype=bool)
++                sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
++                room_masks[idx] = sub_mask
++
++    # Helper: 4-way expansion (Frozen as requested)
++    def expand_from_point(cx, cy):
++        x1 = x2 = cx
++        y1 = y2 = cy
++        fl = fr = ft = fb = False
++        while not (fl and fr and ft and fb):
++            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
++            if not fl:
++                if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
++                else: fl = True
++            if not fr:
++                if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
++                else: fr = True
++            if not ft:
++                if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
++                else: ft = True
++            if not fb:
++                if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
++                else: fb = True
++            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
++        if x2 - x1 < 4 or y2 - y1 < 4: return None
++        return x1, y1, x2, y2
++
++    expanded = []
++
++    expanded_dict = {}
++
++    # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
++    sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
++
++    # Debug: Overlay container
++    for idx, room in sorted_rooms_with_indices:
++        sx, sy = to_px(room['x'], room['z'])
++        clean_name = "".join(c for c in room['name'] if c.isalnum())
++        
++        has_expanded = False
++        if idx in room_masks:
++            mask = room_masks[idx]
++            if not np.any(mask):
++                expanded_dict[idx] = room
++                continue
++            
++            # Prefer starting at the original label position if it's inside the mask and free
++            if mask[sy, sx] and free[sy, sx] != 0:
++                cx, cy = sx, sy
++            else:
++                # Find centroid of this specific room's region
++                M = cv2.moments(mask.astype(np.uint8))
++                if M["m00"] != 0:
++                    cx = int(M["m10"] / M["m00"])
++                    cy = int(M["m01"] / M["m00"])
++                else:
++                    cx, cy = sx, sy
++                    
++                # If centroid is outside the mask, snap to nearest pixel IN mask
++                if not mask[cy, cx]:
++                    ys, xs = np.where(mask)
++                    dists = (xs - cx)**2 + (ys - cy)**2
++                    min_idx = np.argmin(dists)
++                    cx, cy = xs[min_idx], ys[min_idx]
++                
++            # DEBUG IMAGE: Overlay
++            debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
++            debug_img[mask] = [0, 255, 0] # Green mask
++            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
++            
++            if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
++                rect = expand_from_point(cx, cy)
++                if rect:
++                    x1, y1, x2, y2 = rect
++                    
++                    # Mark the expanded region as occupied in the free mask to prevent overlap
++                    free[y1:y2+1, x1:x2+1] = 0
++                    
++                    x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
++                    
++                    # Debug: draw rectangle
++                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
++                    
++                    if x2 - x1 >= 4 and y2 - y1 >= 4:
++                        rx1, rz1 = to_3d(x1, y1)
++                        rx2, rz2 = to_3d(x2, y2)
++                        expanded_dict[idx] = {
++                            "name": room['name'],
++                            "x": room['x'], "z": room['z'],
++                            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
++                            "polygon": [
++                                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
++                                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
++                            ],
++                        }
++                        cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
++                        has_expanded = True
++                        
++            if not has_expanded:
++                cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
++                
++        if not has_expanded:
++            expanded_dict[idx] = room
++            
++    # Reconstruct the expanded list in the original order of rooms_raw
+     expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+     return expanded
+ 
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.
+
+---NEXT---
+
+Created At: 2026-06-26T10:54:33+05:30
+Completed At: 2026-06-26T10:54:33+05:30
+File Path: `file:///C:/Users/Mehak/OneDrive/Desktop/Floor%20to%203D/floor_to_3d/backend/app/services/vision/algorithms.py`
+Total Lines: 629
+Total Bytes: 26610
+Showing lines 1 to 220
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import cv2
+2: import os
+3: def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+4:     """
+5:     v4 pipeline:
+6:     Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
+7:     while keeping the v4 debug logs.
+8:     """
+9:     from collections import deque, defaultdict
+10:     import numpy as np
+11:     import cv2
+12:     import os
+13:     
+14:     os.makedirs("uploads/debug", exist_ok=True)
+15:     
+16:     # 1. Debug Wall Mask
+17:     cv2.imwrite("uploads/debug/walls.png", wall_mask)
+18:     
+19:     aspect = height / width
+20:     
+21:     def to_px(nx, nz):
+22:         px = int((nx + 10) / 20 * width)
+23:         py = int((nz / aspect + 10) / 20 * height)
+24:         return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+25: 
+26:     def to_3d(px, py):
+27:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+28: 
+29:     # 1. Wall Extraction -> Free space
+30:     free = (wall_mask == 0).astype(np.uint8) * 255
+31:     
+32:     # 2. Room Extraction -> Distance Transform Cores
+33:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+34:     
+35:     # Senior Dev Fix: Smooth the distance transform to remove local noise.
+36:     dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+37:     
+38:     # Find local maxima (peaks of rooms)
+39:     local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
+40:     
+41:     # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
+42:     core_threshold = 2
+43:     cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+44:     cores = cv2.dilate(cores, np.ones((3,3)))
+45:     
+46:     # Debug: save cores to verify hallway is connected
+47:     cv2.imwrite("uploads/debug/room_cores.png", cores)
+48:     
+49:     num_labels, comp_map = cv2.connectedComponents(cores)
+50:     
+51:     # Core BFS to partition free space (Voronoi of cores)
+52:     queue = deque()
+53:     region_map = np.zeros_like(comp_map, dtype=np.int32)
+54:     
+55:     ys, xs = np.where(comp_map > 0)
+56:     for y, x in zip(ys, xs):
+57:         queue.append((x, y, comp_map[y, x]))
+58:         region_map[y, x] = comp_map[y, x]
+59:         
+60:     while queue:
+61:         x, y, cid = queue.popleft()
+62:         for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+63:             nx, ny = x + dx, y + dy
+64:             if 0 <= nx < width and 0 <= ny < height:
+65:                 if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+66:                     region_map[ny, nx] = cid
+67:                     queue.append((nx, ny, cid))
+68:                     
+69:     # 3. Label-to-Room Matching
+70:     core_to_labels = defaultdict(list)
+71:     for idx, room in enumerate(rooms_raw):
+72:         sx, sy = to_px(room['x'], room['z'])
+73:         cid = region_map[sy, sx]
+74:         
+75:         if cid == 0:
+76:             # OCR label landed on a wall or outside. Radial search for nearest region.
+77:             found = 0
+78:             for r in range(1, int(min(width, height) * 0.1), 2):
+79:                 y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+80:                 x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+81:                 roi = region_map[y_min:y_max+1, x_min:x_max+1]
+82:                 if np.any(roi > 0):
+83:                     ys_roi, xs_roi = np.where(roi > 0)
+84:                     ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+85:                     dists = (xs_global - sx)**2 + (ys_global - sy)**2
+86:                     min_idx = np.argmin(dists)
+87:                     found = region_map[ys_global[min_idx], xs_global[min_idx]]
+88:                     break
+89:             cid = found
+90:             
+91:         if cid > 0:
+92:             core_to_labels[cid].append((idx, sx, sy))
+93:             
+94:     # 4. Region Generation & Open-Plan Sub-partitioning
+95:     room_masks = {}
+96:     for cid, labels in core_to_labels.items():
+97:         core_mask = (region_map == cid)
+98:         if len(labels) == 1:
+99:             room_masks[labels[0][0]] = core_mask
+100:         else:
+101:             # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
+102:             ys, xs = np.where(core_mask)
+103:             pts = np.column_stack((xs, ys)) # (N, 2)
+104:             label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
+105:             # dists shape: (N, K)
+106:             dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
+107:             closest_idx = np.argmin(dists, axis=1)
+108:             
+109:             for i, l in enumerate(labels):
+110:                 idx = l[0]
+111:                 sub_mask = np.zeros_like(core_mask, dtype=bool)
+112:                 sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+113:                 room_masks[idx] = sub_mask
+114: 
+115:     # Helper: 4-way expansion (Frozen as requested)
+116:     def expand_from_point(cx, cy):
+117:         x1 = x2 = cx
+118:         y1 = y2 = cy
+119:         fl = fr = ft = fb = False
+120:         while not (fl and fr and ft and fb):
+121:             ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+122:             if not fl:
+123:                 if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+124:                 else: fl = True
+125:             if not fr:
+126:                 if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+127:                 else: fr = True
+128:             if not ft:
+129:                 if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+130:                 else: ft = True
+131:             if not fb:
+132:                 if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+133:                 else: fb = True
+134:             if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+135:         if x2 - x1 < 4 or y2 - y1 < 4: return None
+136:         return x1, y1, x2, y2
+137: 
+138:     expanded = []
+139: 
+140:     expanded_dict = {}
+141: 
+142:     # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
+143:     sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+144: 
+145:     # Debug: Overlay container
+146:     for idx, room in sorted_rooms_with_indices:
+147:         sx, sy = to_px(room['x'], room['z'])
+148:         clean_name = "".join(c for c in room['name'] if c.isalnum())
+149:         
+150:         has_expanded = False
+151:         if idx in room_masks:
+152:             mask = room_masks[idx]
+153:             if not np.any(mask):
+154:                 expanded_dict[idx] = room
+155:                 continue
+156:             
+157:             # Prefer starting at the original label position if it's inside the mask and free
+158:             if mask[sy, sx] and free[sy, sx] != 0:
+159:                 cx, cy = sx, sy
+160:             else:
+161:                 # Find centroid of this specific room's region
+162:                 M = cv2.moments(mask.astype(np.uint8))
+163:                 if M["m00"] != 0:
+164:                     cx = int(M["m10"] / M["m00"])
+165:                     cy = int(M["m01"] / M["m00"])
+166:                 else:
+167:                     cx, cy = sx, sy
+168:                     
+169:                 # If centroid is outside the mask, snap to nearest pixel IN mask
+170:                 if not mask[cy, cx]:
+171:                     ys, xs = np.where(mask)
+172:                     dists = (xs - cx)**2 + (ys - cy)**2
+173:                     min_idx = np.argmin(dists)
+174:                     cx, cy = xs[min_idx], ys[min_idx]
+175:                 
+176:             # DEBUG IMAGE: Overlay
+177:             debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+178:             debug_img[mask] = [0, 255, 0] # Green mask
+179:             cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
+180:             
+181:             if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+182:                 rect = expand_from_point(cx, cy)
+183:                 if rect:
+184:                     x1, y1, x2, y2 = rect
+185:                     
+186:                     # Mark the expanded region as occupied in the free mask to prevent overlap
+187:                     free[y1:y2+1, x1:x2+1] = 0
+188:                     
+189:                     x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+190:                     
+191:                     # Debug: draw rectangle
+192:                     cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
+193:                     
+194:                     if x2 - x1 >= 4 and y2 - y1 >= 4:
+195:                         rx1, rz1 = to_3d(x1, y1)
+196:                         rx2, rz2 = to_3d(x2, y2)
+197:                         expanded_dict[idx] = {
+198:                             "name": room['name'],
+199:                             "x": room['x'], "z": room['z'],
+200:                             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+201:                             "polygon": [
+202:                                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+203:                                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+204:                             ],
+205:                         }
+206:                         cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+207:                         has_expanded = True
+208:                         
+209:             if not has_expanded:
+210:                 cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+211:                 
+212:         if not has_expanded:
+213:             expanded_dict[idx] = room
+214:             
+215:     # Reconstruct the expanded list in the original order of rooms_raw
+216:     expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+217:     return expanded
+218: 
+219: 
+220: 
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.
+
+
+---NEXT---
+
+Created At: 2026-06-26T11:01:03+05:30
+Completed At: 2026-06-26T11:01:03+05:30
+File Path: `file:///C:/Users/Mehak/OneDrive/Desktop/Floor%20to%203D/floor_to_3d/backend/app/services/vision/algorithms.py`
+Total Lines: 629
+Total Bytes: 26610
+Showing lines 1 to 217
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import cv2
+2: import os
+3: def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+4:     """
+5:     v4 pipeline:
+6:     Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
+7:     while keeping the v4 debug logs.
+8:     """
+9:     from collections import deque, defaultdict
+10:     import numpy as np
+11:     import cv2
+12:     import os
+13:     
+14:     os.makedirs("uploads/debug", exist_ok=True)
+15:     
+16:     # 1. Debug Wall Mask
+17:     cv2.imwrite("uploads/debug/walls.png", wall_mask)
+18:     
+19:     aspect = height / width
+20:     
+21:     def to_px(nx, nz):
+22:         px = int((nx + 10) / 20 * width)
+23:         py = int((nz / aspect + 10) / 20 * height)
+24:         return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+25: 
+26:     def to_3d(px, py):
+27:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+28: 
+29:     # 1. Wall Extraction -> Free space
+30:     free = (wall_mask == 0).astype(np.uint8) * 255
+31:     
+32:     # 2. Room Extraction -> Distance Transform Cores
+33:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+34:     
+35:     # Senior Dev Fix: Smooth the distance transform to remove local noise.
+36:     dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+37:     
+38:     # Find local maxima (peaks of rooms)
+39:     local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
+40:     
+41:     # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
+42:     core_threshold = 2
+43:     cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+44:     cores = cv2.dilate(cores, np.ones((3,3)))
+45:     
+46:     # Debug: save cores to verify hallway is connected
+47:     cv2.imwrite("uploads/debug/room_cores.png", cores)
+48:     
+49:     num_labels, comp_map = cv2.connectedComponents(cores)
+50:     
+51:     # Core BFS to partition free space (Voronoi of cores)
+52:     queue = deque()
+53:     region_map = np.zeros_like(comp_map, dtype=np.int32)
+54:     
+55:     ys, xs = np.where(comp_map > 0)
+56:     for y, x in zip(ys, xs):
+57:         queue.append((x, y, comp_map[y, x]))
+58:         region_map[y, x] = comp_map[y, x]
+59:         
+60:     while queue:
+61:         x, y, cid = queue.popleft()
+62:         for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+63:             nx, ny = x + dx, y + dy
+64:             if 0 <= nx < width and 0 <= ny < height:
+65:                 if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+66:                     region_map[ny, nx] = cid
+67:                     queue.append((nx, ny, cid))
+68:                     
+69:     # 3. Label-to-Room Matching
+70:     core_to_labels = defaultdict(list)
+71:     for idx, room in enumerate(rooms_raw):
+72:         sx, sy = to_px(room['x'], room['z'])
+73:         cid = region_map[sy, sx]
+74:         
+75:         if cid == 0:
+76:             # OCR label landed on a wall or outside. Radial search for nearest region.
+77:             found = 0
+78:             for r in range(1, int(min(width, height) * 0.1), 2):
+79:                 y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+80:                 x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+81:                 roi = region_map[y_min:y_max+1, x_min:x_max+1]
+82:                 if np.any(roi > 0):
+83:                     ys_roi, xs_roi = np.where(roi > 0)
+84:                     ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+85:                     dists = (xs_global - sx)**2 + (ys_global - sy)**2
+86:                     min_idx = np.argmin(dists)
+87:                     found = region_map[ys_global[min_idx], xs_global[min_idx]]
+88:                     break
+89:             cid = found
+90:             
+91:         if cid > 0:
+92:             core_to_labels[cid].append((idx, sx, sy))
+93:             
+94:     # 4. Region Generation & Open-Plan Sub-partitioning
+95:     room_masks = {}
+96:     for cid, labels in core_to_labels.items():
+97:         core_mask = (region_map == cid)
+98:         if len(labels) == 1:
+99:             room_masks[labels[0][0]] = core_mask
+100:         else:
+101:             # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
+102:             ys, xs = np.where(core_mask)
+103:             pts = np.column_stack((xs, ys)) # (N, 2)
+104:             label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
+105:             # dists shape: (N, K)
+106:             dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
+107:             closest_idx = np.argmin(dists, axis=1)
+108:             
+109:             for i, l in enumerate(labels):
+110:                 idx = l[0]
+111:                 sub_mask = np.zeros_like(core_mask, dtype=bool)
+112:                 sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+113:                 room_masks[idx] = sub_mask
+114: 
+115:     # Helper: 4-way expansion (Frozen as requested)
+116:     def expand_from_point(cx, cy):
+117:         x1 = x2 = cx
+118:         y1 = y2 = cy
+119:         fl = fr = ft = fb = False
+120:         while not (fl and fr and ft and fb):
+121:             ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+122:             if not fl:
+123:                 if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+124:                 else: fl = True
+125:             if not fr:
+126:                 if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+127:                 else: fr = True
+128:             if not ft:
+129:                 if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+130:                 else: ft = True
+131:             if not fb:
+132:                 if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+133:                 else: fb = True
+134:             if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+135:         if x2 - x1 < 4 or y2 - y1 < 4: return None
+136:         return x1, y1, x2, y2
+137: 
+138:     expanded = []
+139: 
+140:     expanded_dict = {}
+141: 
+142:     # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
+143:     sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+144: 
+145:     # Debug: Overlay container
+146:     for idx, room in sorted_rooms_with_indices:
+147:         sx, sy = to_px(room['x'], room['z'])
+148:         clean_name = "".join(c for c in room['name'] if c.isalnum())
+149:         
+150:         has_expanded = False
+151:         if idx in room_masks:
+152:             mask = room_masks[idx]
+153:             if not np.any(mask):
+154:                 expanded_dict[idx] = room
+155:                 continue
+156:             
+157:             # Prefer starting at the original label position if it's inside the mask and free
+158:             if mask[sy, sx] and free[sy, sx] != 0:
+159:                 cx, cy = sx, sy
+160:             else:
+161:                 # Find centroid of this specific room's region
+162:                 M = cv2.moments(mask.astype(np.uint8))
+163:                 if M["m00"] != 0:
+164:                     cx = int(M["m10"] / M["m00"])
+165:                     cy = int(M["m01"] / M["m00"])
+166:                 else:
+167:                     cx, cy = sx, sy
+168:                     
+169:                 # If centroid is outside the mask, snap to nearest pixel IN mask
+170:                 if not mask[cy, cx]:
+171:                     ys, xs = np.where(mask)
+172:                     dists = (xs - cx)**2 + (ys - cy)**2
+173:                     min_idx = np.argmin(dists)
+174:                     cx, cy = xs[min_idx], ys[min_idx]
+175:                 
+176:             # DEBUG IMAGE: Overlay
+177:             debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+178:             debug_img[mask] = [0, 255, 0] # Green mask
+179:             cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
+180:             
+181:             if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+182:                 rect = expand_from_point(cx, cy)
+183:                 if rect:
+184:                     x1, y1, x2, y2 = rect
+185:                     
+186:                     # Mark the expanded region as occupied in the free mask to prevent overlap
+187:                     free[y1:y2+1, x1:x2+1] = 0
+188:                     
+189:                     x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+190:                     
+191:                     # Debug: draw rectangle
+192:                     cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
+193:                     
+194:                     if x2 - x1 >= 4 and y2 - y1 >= 4:
+195:                         rx1, rz1 = to_3d(x1, y1)
+196:                         rx2, rz2 = to_3d(x2, y2)
+197:                         expanded_dict[idx] = {
+198:                             "name": room['name'],
+199:                             "x": room['x'], "z": room['z'],
+200:                             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+201:                             "polygon": [
+202:                                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+203:                                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+204:                             ],
+205:                         }
+206:                         cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+207:                         has_expanded = True
+208:                         
+209:             if not has_expanded:
+210:                 cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+211:                 
+212:         if not has_expanded:
+213:             expanded_dict[idx] = room
+214:             
+215:     # Reconstruct the expanded list in the original order of rooms_raw
+216:     expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+217:     return expanded
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.
+
+
+---NEXT---
+
+Created At: 2026-06-26T11:01:59+05:30
+Completed At: 2026-06-26T11:01:59+05:30
+The following changes were made by the replace_file_content tool to: C:\Users\Mehak\OneDrive\Desktop\Floor to 3D\floor_to_3d\backend\app\services\vision\algorithms.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -1,5 +1,251 @@
+ import cv2
+ import os
++
++def _expand_rooms_v5(rooms_raw, wall_mask, wall_thickness, height, width):
++    """
++    v5 pipeline:
++    Copy of v4 with added fallback for unlabeled blueprints.
++    When OCR finds labels → behaves identically to v4.
++    When no labels are found → auto-generates room seeds from distance transform cores.
++    """
++    from collections import deque, defaultdict
++    import numpy as np
++    import cv2
++    import os
++    
++    os.makedirs("uploads/debug", exist_ok=True)
++    
++    # Ensure rooms_raw is a mutable list (needed for fallback append)
++    rooms_raw = list(rooms_raw)
++    
++    # 1. Debug Wall Mask
++    cv2.imwrite("uploads/debug/walls.png", wall_mask)
++    
++    aspect = height / width
++    
++    def to_px(nx, nz):
++        px = int((nx + 10) / 20 * width)
++        py = int((nz / aspect + 10) / 20 * height)
++        return max(0, min(width - 1, px)), max(0, min(height - 1, py))
++
++    def to_3d(px, py):
++        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
++
++    # 1. Wall Extraction -> Free space
++    free = (wall_mask == 0).astype(np.uint8) * 255
++    
++    # 2. Room Extraction -> Distance Transform Cores
++    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
++    
++    # Senior Dev Fix: Smooth the distance transform to remove local noise.
++    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
++    
++    # Find local maxima (peaks of rooms)
++    local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
++    
++    # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
++    core_threshold = 2
++    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
++    cores = cv2.dilate(cores, np.ones((3,3)))
++    
++    # Debug: save cores to verify hallway is connected
++    cv2.imwrite("uploads/debug/room_cores.png", cores)
++    
++    num_labels, comp_map = cv2.connectedComponents(cores)
++    
++    # Core BFS to partition free space (Voronoi of cores)
++    queue = deque()
++    region_map = np.zeros_like(comp_map, dtype=np.int32)
++    
++    ys, xs = np.where(comp_map > 0)
++    for y, x in zip(ys, xs):
++        queue.append((x, y, comp_map[y, x]))
++        region_map[y, x] = comp_map[y, x]
++        
++    while queue:
++        x, y, cid = queue.popleft()
++        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
++            nx, ny = x + dx, y + dy
++            if 0 <= nx < width and 0 <= ny < height:
++                if free[ny, nx] > 0 and region_map[ny, nx] == 0:
++                    region_map[ny, nx] = cid
++                    queue.append((nx, ny, cid))
++                    
++    # 3. Label-to-Room Matching
++    core_to_labels = defaultdict(list)
++    for idx, room in enumerate(rooms_raw):
++        sx, sy = to_px(room['x'], room['z'])
++        cid = region_map[sy, sx]
++        
++        if cid == 0:
++            # OCR label landed on a wall or outside. Radial search for nearest region.
++            found = 0
++            for r in range(1, int(min(width, height) * 0.1), 2):
++                y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
++                x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
++                roi = region_map[y_min:y_max+1, x_min:x_max+1]
++                if np.any(roi > 0):
++                    ys_roi, xs_roi = np.where(roi > 0)
++                    ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
++                    dists = (xs_global - sx)**2 + (ys_global - sy)**2
++                    min_idx = np.argmin(dists)
++                    found = region_map[ys_global[min_idx], xs_global[min_idx]]
++                    break
++            cid = found
++            
++        if cid > 0:
++            core_to_labels[cid].append((idx, sx, sy))
++            
++    # 4. Region Generation & Open-Plan Sub-partitioning
++    room_masks = {}
++    for cid, labels in core_to_labels.items():
++        core_mask = (region_map == cid)
++        if len(labels) == 1:
++            room_masks[labels[0][0]] = core_mask
++        else:
++            # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
++            ys, xs = np.where(core_mask)
++            pts = np.column_stack((xs, ys)) # (N, 2)
++            label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
++            # dists shape: (N, K)
++            dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
++            closest_idx = np.argmin(dists, axis=1)
++            
++            for i, l in enumerate(labels):
++                idx = l[0]
++                sub_mask = np.zeros_like(core_mask, dtype=bool)
++                sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
++                room_masks[idx] = sub_mask
++
++    # ── v5 NEW: Fallback for unlabeled blueprints ─────────────────────────────
++    # When OCR found no labels, room_masks is empty. Auto-generate room seeds
++    # from distance transform core peaks (geometry-only room detection).
++    if not room_masks:
++        min_room_area = max(100, int(height * width * 0.005))
++        for cid in range(1, num_labels):
++            region_mask = (region_map == cid)
++            area = int(region_mask.sum())
++            
++            if area < min_room_area:
++                continue  # Skip noise — too small to be a real room
++            
++            # Find the deepest point in this region (furthest from walls)
++            dist_region = dist_smooth.copy()
++            dist_region[~region_mask] = 0
++            peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
++            cy_auto, cx_auto = int(peak[0]), int(peak[1])
++            
++            auto_idx = len(rooms_raw)
++            x3d, z3d = to_3d(cx_auto, cy_auto)
++            rooms_raw.append({"name": f"Room {auto_idx + 1}", "x": x3d, "z": z3d})
++            room_masks[auto_idx] = region_mask
++    # ── end v5 fallback ───────────────────────────────────────────────────────
++
++    # Helper: 4-way expansion (Frozen as requested)
++    def expand_from_point(cx, cy):
++        x1 = x2 = cx
++        y1 = y2 = cy
++        fl = fr = ft = fb = False
++        while not (fl and fr and ft and fb):
++            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
++            if not fl:
++                if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
++                else: fl = True
++            if not fr:
++                if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
++                else: fr = True
++            if not ft:
++                if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
++                else: ft = True
++            if not fb:
++                if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
++                else: fb = True
++            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
++        if x2 - x1 < 4 or y2 - y1 < 4: return None
++        return x1, y1, x2, y2
++
++    expanded = []
++
++    expanded_dict = {}
++
++    # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
++    sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
++
++    # Debug: Overlay container
++    for idx, room in sorted_rooms_with_indices:
++        sx, sy = to_px(room['x'], room['z'])
++        clean_name = "".join(c for c in room['name'] if c.isalnum())
++        
++        has_expanded = False
++        if idx in room_masks:
++            mask = room_masks[idx]
++            if not np.any(mask):
++                expanded_dict[idx] = room
++                continue
++            
++            # Prefer starting at the original label position if it's inside the mask and free
++            if mask[sy, sx] and free[sy, sx] != 0:
++                cx, cy = sx, sy
++            else:
++                # Find centroid of this specific room's region
++                M = cv2.moments(mask.astype(np.uint8))
++                if M["m00"] != 0:
++                    cx = int(M["m10"] / M["m00"])
++                    cy = int(M["m01"] / M["m00"])
++                else:
++                    cx, cy = sx, sy
++                    
++                # If centroid is outside the mask, snap to nearest pixel IN mask
++                if not mask[cy, cx]:
++                    ys, xs = np.where(mask)
++                    dists = (xs - cx)**2 + (ys - cy)**2
++                    min_idx = np.argmin(dists)
++                    cx, cy = xs[min_idx], ys[min_idx]
++                
++            # DEBUG IMAGE: Overlay
++            debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
++            debug_img[mask] = [0, 255, 0] # Green mask
++            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
++            
++            if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
++                rect = expand_from_point(cx, cy)
++                if rect:
++                    x1, y1, x2, y2 = rect
++                    
++                    # Mark the expanded region as occupied in the free mask to prevent overlap
++                    free[y1:y2+1, x1:x2+1] = 0
++                    
++                    x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
++                    
++                    # Debug: draw rectangle
++                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
++                    
++                    if x2 - x1 >= 4 and y2 - y1 >= 4:
++                        rx1, rz1 = to_3d(x1, y1)
++                        rx2, rz2 = to_3d(x2, y2)
++                        expanded_dict[idx] = {
++                            "name": room['name'],
++                            "x": room['x'], "z": room['z'],
++                            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
++                            "polygon": [
++                                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
++                                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
++                            ],
++                        }
++                        cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
++                        has_expanded = True
++                        
++            if not has_expanded:
++                cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
++                
++        if not has_expanded:
++            expanded_dict[idx] = room
++            
++    # Reconstruct the expanded list in the original order of rooms_raw
++    expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
++    return expanded
++
++
+ def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+     """
+     v4 pipeline:
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.
+
+---NEXT---
+
+Created At: 2026-06-26T11:14:02+05:30
+Completed At: 2026-06-26T11:14:03+05:30
+File Path: `file:///C:/Users/Mehak/OneDrive/Desktop/Floor%20to%203D/floor_to_3d/backend/app/services/vision/algorithms.py`
+Total Lines: 875
+Total Bytes: 37350
+Showing lines 1 to 250
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import cv2
+2: import os
+3: 
+4: def _expand_rooms_v5(rooms_raw, wall_mask, wall_thickness, height, width):
+5:     """
+6:     v5 pipeline:
+7:     Copy of v4 with added fallback for unlabeled blueprints.
+8:     When OCR finds labels → behaves identically to v4.
+9:     When no labels are found → auto-generates room seeds from distance transform cores.
+10:     """
+11:     from collections import deque, defaultdict
+12:     import numpy as np
+13:     import cv2
+14:     import os
+15:     
+16:     os.makedirs("uploads/debug", exist_ok=True)
+17:     
+18:     # Ensure rooms_raw is a mutable list (needed for fallback append)
+19:     rooms_raw = list(rooms_raw)
+20:     
+21:     # 1. Debug Wall Mask
+22:     cv2.imwrite("uploads/debug/walls.png", wall_mask)
+23:     
+24:     aspect = height / width
+25:     
+26:     def to_px(nx, nz):
+27:         px = int((nx + 10) / 20 * width)
+28:         py = int((nz / aspect + 10) / 20 * height)
+29:         return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+30: 
+31:     def to_3d(px, py):
+32:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+33: 
+34:     # 1. Wall Extraction -> Free space
+35:     free = (wall_mask == 0).astype(np.uint8) * 255
+36:     
+37:     # 2. Room Extraction -> Distance Transform Cores
+38:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+39:     
+40:     # Senior Dev Fix: Smooth the distance transform to remove local noise.
+41:     dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+42:     
+43:     # Find local maxima (peaks of rooms)
+44:     local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
+45:     
+46:     # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
+47:     core_threshold = 2
+48:     cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+49:     cores = cv2.dilate(cores, np.ones((3,3)))
+50:     
+51:     # Debug: save cores to verify hallway is connected
+52:     cv2.imwrite("uploads/debug/room_cores.png", cores)
+53:     
+54:     num_labels, comp_map = cv2.connectedComponents(cores)
+55:     
+56:     # Core BFS to partition free space (Voronoi of cores)
+57:     queue = deque()
+58:     region_map = np.zeros_like(comp_map, dtype=np.int32)
+59:     
+60:     ys, xs = np.where(comp_map > 0)
+61:     for y, x in zip(ys, xs):
+62:         queue.append((x, y, comp_map[y, x]))
+63:         region_map[y, x] = comp_map[y, x]
+64:         
+65:     while queue:
+66:         x, y, cid = queue.popleft()
+67:         for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+68:             nx, ny = x + dx, y + dy
+69:             if 0 <= nx < width and 0 <= ny < height:
+70:                 if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+71:                     region_map[ny, nx] = cid
+72:                     queue.append((nx, ny, cid))
+73:                     
+74:     # 3. Label-to-Room Matching
+75:     core_to_labels = defaultdict(list)
+76:     for idx, room in enumerate(rooms_raw):
+77:         sx, sy = to_px(room['x'], room['z'])
+78:         cid = region_map[sy, sx]
+79:         
+80:         if cid == 0:
+81:             # OCR label landed on a wall or outside. Radial search for nearest region.
+82:             found = 0
+83:             for r in range(1, int(min(width, height) * 0.1), 2):
+84:                 y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+85:                 x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+86:                 roi = region_map[y_min:y_max+1, x_min:x_max+1]
+87:                 if np.any(roi > 0):
+88:                     ys_roi, xs_roi = np.where(roi > 0)
+89:                     ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+90:                     dists = (xs_global - sx)**2 + (ys_global - sy)**2
+91:                     min_idx = np.argmin(dists)
+92:                     found = region_map[ys_global[min_idx], xs_global[min_idx]]
+93:                     break
+94:             cid = found
+95:             
+96:         if cid > 0:
+97:             core_to_labels[cid].append((idx, sx, sy))
+98:             
+99:     # 4. Region Generation & Open-Plan Sub-partitioning
+100:     room_masks = {}
+101:     for cid, labels in core_to_labels.items():
+102:         core_mask = (region_map == cid)
+103:         if len(labels) == 1:
+104:             room_masks[labels[0][0]] = core_mask
+105:         else:
+106:             # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
+107:             ys, xs = np.where(core_mask)
+108:             pts = np.column_stack((xs, ys)) # (N, 2)
+109:             label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
+110:             # dists shape: (N, K)
+111:             dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
+112:             closest_idx = np.argmin(dists, axis=1)
+113:             
+114:             for i, l in enumerate(labels):
+115:                 idx = l[0]
+116:                 sub_mask = np.zeros_like(core_mask, dtype=bool)
+117:                 sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+118:                 room_masks[idx] = sub_mask
+119: 
+120:     # ── v5 NEW: Fallback for unlabeled blueprints ─────────────────────────────
+121:     # When OCR found no labels, room_masks is empty. Auto-generate room seeds
+122:     # from distance transform core peaks (geometry-only room detection).
+123:     if not room_masks:
+124:         min_room_area = max(100, int(height * width * 0.005))
+125:         for cid in range(1, num_labels):
+126:             region_mask = (region_map == cid)
+127:             area = int(region_mask.sum())
+128:             
+129:             if area < min_room_area:
+130:                 continue  # Skip noise — too small to be a real room
+131:             
+132:             # Find the deepest point in this region (furthest from walls)
+133:             dist_region = dist_smooth.copy()
+134:             dist_region[~region_mask] = 0
+135:             peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
+136:             cy_auto, cx_auto = int(peak[0]), int(peak[1])
+137:             
+138:             auto_idx = len(rooms_raw)
+139:             x3d, z3d = to_3d(cx_auto, cy_auto)
+140:             rooms_raw.append({"name": f"Room {auto_idx + 1}", "x": x3d, "z": z3d})
+141:             room_masks[auto_idx] = region_mask
+142:     # ── end v5 fallback ───────────────────────────────────────────────────────
+143: 
+144:     # Helper: 4-way expansion (Frozen as requested)
+145:     def expand_from_point(cx, cy):
+146:         x1 = x2 = cx
+147:         y1 = y2 = cy
+148:         fl = fr = ft = fb = False
+149:         while not (fl and fr and ft and fb):
+150:             ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+151:             if not fl:
+152:                 if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+153:                 else: fl = True
+154:             if not fr:
+155:                 if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+156:                 else: fr = True
+157:             if not ft:
+158:                 if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+159:                 else: ft = True
+160:             if not fb:
+161:                 if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+162:                 else: fb = True
+163:             if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+164:         if x2 - x1 < 4 or y2 - y1 < 4: return None
+165:         return x1, y1, x2, y2
+166: 
+167:     expanded = []
+168: 
+169:     expanded_dict = {}
+170: 
+171:     # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
+172:     sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+173: 
+174:     # Debug: Overlay container
+175:     for idx, room in sorted_rooms_with_indices:
+176:         sx, sy = to_px(room['x'], room['z'])
+177:         clean_name = "".join(c for c in room['name'] if c.isalnum())
+178:         
+179:         has_expanded = False
+180:         if idx in room_masks:
+181:             mask = room_masks[idx]
+182:             if not np.any(mask):
+183:                 expanded_dict[idx] = room
+184:                 continue
+185:             
+186:             # Prefer starting at the original label position if it's inside the mask and free
+187:             if mask[sy, sx] and free[sy, sx] != 0:
+188:                 cx, cy = sx, sy
+189:             else:
+190:                 # Find centroid of this specific room's region
+191:                 M = cv2.moments(mask.astype(np.uint8))
+192:                 if M["m00"] != 0:
+193:                     cx = int(M["m10"] / M["m00"])
+194:                     cy = int(M["m01"] / M["m00"])
+195:                 else:
+196:                     cx, cy = sx, sy
+197:                     
+198:                 # If centroid is outside the mask, snap to nearest pixel IN mask
+199:                 if not mask[cy, cx]:
+200:                     ys, xs = np.where(mask)
+201:                     dists = (xs - cx)**2 + (ys - cy)**2
+202:                     min_idx = np.argmin(dists)
+203:                     cx, cy = xs[min_idx], ys[min_idx]
+204:                 
+205:             # DEBUG IMAGE: Overlay
+206:             debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+207:             debug_img[mask] = [0, 255, 0] # Green mask
+208:             cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
+209:             
+210:             if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+211:                 rect = expand_from_point(cx, cy)
+212:                 if rect:
+213:                     x1, y1, x2, y2 = rect
+214:                     
+215:                     # Mark the expanded region as occupied in the free mask to prevent overlap
+216:                     free[y1:y2+1, x1:x2+1] = 0
+217:                     
+218:                     x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+219:                     
+220:                     # Debug: draw rectangle
+221:                     cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
+222:                     
+223:                     if x2 - x1 >= 4 and y2 - y1 >= 4:
+224:                         rx1, rz1 = to_3d(x1, y1)
+225:                         rx2, rz2 = to_3d(x2, y2)
+226:                         expanded_dict[idx] = {
+227:                             "name": room['name'],
+228:                             "x": room['x'], "z": room['z'],
+229:                             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+230:                             "polygon": [
+231:                                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+232:                                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+233:                             ],
+234:                         }
+235:                         cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+236:                         has_expanded = True
+237:                         
+238:             if not has_expanded:
+239:                 cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+240:                 
+241:         if not has_expanded:
+242:             expanded_dict[idx] = room
+243:             
+244:     # Reconstruct the expanded list in the original order of rooms_raw
+245:     expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+246:     return expanded
+247: 
+248: 
+249: def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+250:     """
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.
+
+
+---NEXT---
+
+Created At: 2026-06-26T11:15:15+05:30
+Completed At: 2026-06-26T11:15:16+05:30
+The following changes were made by the replace_file_content tool to: C:\Users\Mehak\OneDrive\Desktop\Floor to 3D\floor_to_3d\backend\app\services\vision\algorithms.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -3,247 +3,175 @@
+ 
+ def _expand_rooms_v5(rooms_raw, wall_mask, wall_thickness, height, width):
+     """
+-    v5 pipeline:
+-    Copy of v4 with added fallback for unlabeled blueprints.
+-    When OCR finds labels → behaves identically to v4.
+-    When no labels are found → auto-generates room seeds from distance transform cores.
+-    """
+-    from collections import deque, defaultdict
+-    import numpy as np
+-    import cv2
+-    import os
+-    
+-    os.makedirs("uploads/debug", exist_ok=True)
+-    
+-    # Ensure rooms_raw is a mutable list (needed for fallback append)
+-    rooms_raw = list(rooms_raw)
+-    
+-    # 1. Debug Wall Mask
+-    cv2.imwrite("uploads/debug/walls.png", wall_mask)
+-    
+-    aspect = height / width
+-    
+-    def to_px(nx, nz):
+-        px = int((nx + 10) / 20 * width)
+-        py = int((nz / aspect + 10) / 20 * height)
+-        return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+-
+-    def to_3d(px, py):
+-        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+-
+-    # 1. Wall Extraction -> Free space
+-    free = (wall_mask == 0).astype(np.uint8) * 255
+-    
+-    # 2. Room Extraction -> Distance Transform Cores
+-    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+-    
+-    # Senior Dev Fix: Smooth the distance transform to remove local noise.
+-    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+-    
+-    # Find local maxima (peaks of rooms)
+-    local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
+-    
+-    # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
+-    core_threshold = 2
+-    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+-    cores = cv2.dilate(cores, np.ones((3,3)))
+-    
+-    # Debug: save cores to verify hallway is connected
+-    cv2.imwrite("uploads/debug/room_cores.png", cores)
+-    
+-    num_labels, comp_map = cv2.connectedComponents(cores)
+-    
+-    # Core BFS to partition free space (Voronoi of cores)
+-    queue = deque()
+-    region_map = np.zeros_like(comp_map, dtype=np.int32)
+-    
+-    ys, xs = np.where(comp_map > 0)
+-    for y, x in zip(ys, xs):
+-        queue.append((x, y, comp_map[y, x]))
+-        region_map[y, x] = comp_map[y, x]
+-        
+-    while queue:
+-        x, y, cid = queue.popleft()
+-        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+-            nx, ny = x + dx, y + dy
+-            if 0 <= nx < width and 0 <= ny < height:
+-                if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+-                    region_map[ny, nx] = cid
+-                    queue.append((nx, ny, cid))
+-                    
+-    # 3. Label-to-Room Matching
+-    core_to_labels = defaultdict(list)
+-    for idx, room in enumerate(rooms_raw):
+-        sx, sy = to_px(room['x'], room['z'])
+-        cid = region_map[sy, sx]
+-        
+-        if cid == 0:
+-            # OCR label landed on a wall or outside. Radial search for nearest region.
+-            found = 0
+-            for r in range(1, int(min(width, height) * 0.1), 2):
+-                y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+-                x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+-                roi = region_map[y_min:y_max+1, x_min:x_max+1]
+-                if np.any(roi > 0):
+-                    ys_roi, xs_roi = np.where(roi > 0)
+-                    ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+-                    dists = (xs_global - sx)**2 + (ys_global - sy)**2
+-                    min_idx = np.argmin(dists)
+-                    found = region_map[ys_global[min_idx], xs_global[min_idx]]
+-                    break
+-            cid = found
+-            
+-        if cid > 0:
+-            core_to_labels[cid].append((idx, sx, sy))
+-            
+-    # 4. Region Generation & Open-Plan Sub-partitioning
+-    room_masks = {}
+-    for cid, labels in core_to_labels.items():
+-        core_mask = (region_map == cid)
+-        if len(labels) == 1:
+-            room_masks[labels[0][0]] = core_mask
+-        else:
+-            # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
+-            ys, xs = np.where(core_mask)
+-            pts = np.column_stack((xs, ys)) # (N, 2)
+-            label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
+-            # dists shape: (N, K)
+-            dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
+-            closest_idx = np.argmin(dists, axis=1)
+-            
+-            for i, l in enumerate(labels):
+-                idx = l[0]
+-                sub_mask = np.zeros_like(core_mask, dtype=bool)
+-                sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+-                room_masks[idx] = sub_mask
+-
+-    # ── v5 NEW: Fallback for unlabeled blueprints ─────────────────────────────
+-    # When OCR found no labels, room_masks is empty. Auto-generate room seeds
+-    # from distance transform core peaks (geometry-only room detection).
+-    if not room_masks:
+-        min_room_area = max(100, int(height * width * 0.005))
+-        for cid in range(1, num_labels):
+-            region_mask = (region_map == cid)
+-            area = int(region_mask.sum())
+-            
+-            if area < min_room_area:
+-                continue  # Skip noise — too small to be a real room
+-            
+-            # Find the deepest point in this region (furthest from walls)
+-            dist_region = dist_smooth.copy()
+-            dist_region[~region_mask] = 0
+-            peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
+-            cy_auto, cx_auto = int(peak[0]), int(peak[1])
+-            
+-            auto_idx = len(rooms_raw)
+-            x3d, z3d = to_3d(cx_auto, cy_auto)
+-            rooms_raw.append({"name": f"Room {auto_idx + 1}", "x": x3d, "z": z3d})
+-            room_masks[auto_idx] = region_mask
+-    # ── end v5 fallback ───────────────────────────────────────────────────────
+-
+-    # Helper: 4-way expansion (Frozen as requested)
+-    def expand_from_point(cx, cy):
+-        x1 = x2 = cx
+-        y1 = y2 = cy
+-        fl = fr = ft = fb = False
+-        while not (fl and fr and ft and fb):
+-            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+-            if not fl:
+-                if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+-                else: fl = True
+-            if not fr:
+-                if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+-                else: fr = True
+-            if not ft:
+-                if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+-                else: ft = True
+-            if not fb:
+-                if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+-                else: fb = True
+-            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+-        if x2 - x1 < 4 or y2 - y1 < 4: return None
+-        return x1, y1, x2, y2
+-
+-    expanded = []
+-
+-    expanded_dict = {}
+-
+-    # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
+-    sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+-
+-    # Debug: Overlay container
+-    for idx, room in sorted_rooms_with_indices:
+-        sx, sy = to_px(room['x'], room['z'])
+-        clean_name = "".join(c for c in room['name'] if c.isalnum())
+-        
+-        has_expanded = False
+-        if idx in room_masks:
+-            mask = room_masks[idx]
+-            if not np.any(mask):
+-                expanded_dict[idx] = room
+-                continue
+-            
+-            # Prefer starting at the original label position if it's inside the mask and free
+-            if mask[sy, sx] and free[sy, sx] != 0:
+-                cx, cy = sx, sy
+-            else:
+-                # Find centroid of this specific room's region
+-                M = cv2.moments(mask.astype(np.uint8))
+-                if M["m00"] != 0:
+-                    cx = int(M["m10"] / M["m00"])
+-                    cy = int(M["m01"] / M["m00"])
+-                else:
+-                    cx, cy = sx, sy
+-                    
+-                # If centroid is outside the mask, snap to nearest pixel IN mask
+-                if not mask[cy, cx]:
+-                    ys, xs = np.where(mask)
+-                    dists = (xs - cx)**2 + (ys - cy)**2
+-                    min_idx = np.argmin(dists)
+-                    cx, cy = xs[min_idx], ys[min_idx]
+-                
+-            # DEBUG IMAGE: Overlay
+-            debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+-            debug_img[mask] = [0, 255, 0] # Green mask
+-            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
+-            
+-            if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+-                rect = expand_from_point(cx, cy)
+-                if rect:
+-                    x1, y1, x2, y2 = rect
+-                    
+-                    # Mark the expanded region as occupied in the free mask to prevent overlap
+-                    free[y1:y2+1, x1:x2+1] = 0
+-                    
+-                    x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+-                    
+-                    # Debug: draw rectangle
+-                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
+-                    
+-                    if x2 - x1 >= 4 and y2 - y1 >= 4:
+-                        rx1, rz1 = to_3d(x1, y1)
+-                        rx2, rz2 = to_3d(x2, y2)
+-                        expanded_dict[idx] = {
+-                            "name": room['name'],
+-                            "x": room['x'], "z": room['z'],
+-                            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+-                            "polygon": [
+-                                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+-                                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+-                            ],
+-                        }
+-                        cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+-                        has_expanded = True
+-                        
+-            if not has_expanded:
+-                cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+-                
+-        if not has_expanded:
+-            expanded_dict[idx] = room
+-            
+-    # Reconstruct the expanded list in the original order of rooms_raw
+-    expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+-    return expanded
++    v5 pipeline (Architecture-First approach):
++    1. Detect building boundary
++    2. Generate room candidates purely from geometry
++    3. Expand while preventing overlaps
++    4. Post-assign OCR labels to valid rooms
++    """
++    import numpy as np
++    import cv2
++    import os
++    
++    os.makedirs("uploads/debug", exist_ok=True)
++    cv2.imwrite("uploads/debug/v5_walls.png", wall_mask)
++    
++    aspect = height / width
++    
++    def to_px(nx, nz):
++        px = int((nx + 10) / 20 * width)
++        py = int((nz / aspect + 10) / 20 * height)
++        return max(0, min(width - 1, px)), max(0, min(height - 1, py))
++
++    def to_3d(px, py):
++        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
++
++    # 1. Detect building boundary (convex hull of all walls)
++    points = cv2.findNonZero(wall_mask)
++    building_mask = np.zeros_like(wall_mask)
++    if points is not None:
++        hull = cv2.convexHull(points)
++        cv2.fillConvexPoly(building_mask, hull, 255)
++    else:
++        building_mask.fill(255)
++        
++    cv2.imwrite("uploads/debug/v5_building_mask.png", building_mask)
++
++    # 2. Free space inside building only
++    free = (wall_mask == 0).astype(np.uint8) * 255
++    free = cv2.bitwise_and(free, building_mask)
++    
++    # 3. Geometry-based room proposal generation
++    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
++    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
++    local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
++    core_threshold = 2
++    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
++    cores = cv2.dilate(cores, np.ones((3,3)))
++    cv2.imwrite("uploads/debug/v5_cores.png", cores)
++    
++    num_labels, comp_map = cv2.connectedComponents(cores)
++    
++    # Generate candidates from each core
++    min_room_area = max(100, int(height * width * 0.005))
++    candidates = []
++    
++    for cid in range(1, num_labels):
++        region_mask = (comp_map == cid)
++        if region_mask.sum() < 5:
++            continue
++            
++        dist_region = dist_smooth.copy()
++        dist_region[~region_mask] = 0
++        peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
++        cy, cx = int(peak[0]), int(peak[1])
++        
++        candidates.append({'cx': cx, 'cy': cy, 'score': dist_region[cy, cx]})
++        
++    # Sort candidates by score (deepest/largest first) to prioritize main rooms
++    candidates.sort(key=lambda c: c['score'], reverse=True)
++    
++    # Helper: 4-way expansion
++    def expand_from_point(cx, cy, current_free):
++        x1 = x2 = cx
++        y1 = y2 = cy
++        fl = fr = ft = fb = False
++        while not (fl and fr and ft and fb):
++            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
++            if not fl:
++                if ox1 - 1 >= 0 and current_free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
++                else: fl = True
++            if not fr:
++                if ox2 + 1 < width and current_free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
++                else: fr = True
++            if not ft:
++                if oy1 - 1 >= 0 and current_free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
++                else: ft = True
++            if not fb:
++                if oy2 + 1 < height and current_free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
++                else: fb = True
++            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
++        if x2 - x1 < 4 or y2 - y1 < 4: return None
++        return x1, y1, x2, y2
++
++    # 4. Filter and expand candidates (prevent overlaps)
++    working_free = free.copy()
++    valid_rooms = []
++    
++    debug_rooms = cv2.cvtColor(working_free, cv2.COLOR_GRAY2BGR)
++    
++    for cand in candidates:
++        cx, cy = cand['cx'], cand['cy']
++        if working_free[cy, cx] == 0:
++            continue # Center is no longer free (e.g. inside another expanded room)
++            
++        rect = expand_from_point(cx, cy, working_free)
++        if rect:
++            x1, y1, x2, y2 = rect
++            area = (x2 - x1) * (y2 - y1)
++            
++            # Require minimum area to be a valid room
++            if area >= min_room_area:
++                # Mark as occupied to prevent overlaps
++                working_free[y1:y2+1, x1:x2+1] = 0
++                
++                # Slight shrink for visuals
++                x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
++                if x2 > x1 and y2 > y1:
++                    valid_rooms.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2})
++                    cv2.rectangle(debug_rooms, (x1, y1), (x2, y2), (0, 255, 0), 2)
++                    
++    cv2.imwrite("uploads/debug/v5_final_rooms.png", debug_rooms)
++                    
++    # 5. Assign OCR labels to valid rooms
++    final_rooms = []
++    used_labels = set()
++    
++    for i, vr in enumerate(valid_rooms):
++        x1, y1, x2, y2 = vr['x1'], vr['y1'], vr['x2'], vr['y2']
++        
++        # Find best matching label
++        best_label_idx = -1
++        best_label_dist = float('inf')
++        
++        for l_idx, label in enumerate(rooms_raw):
++            if l_idx in used_labels:
++                continue
++                
++            lx, ly = to_px(label['x'], label['z'])
++            
++            # Check if label center is inside the room rect
++            if x1 <= lx <= x2 and y1 <= ly <= y2:
++                rcx = (x1 + x2) / 2
++                rcy = (y1 + y2) / 2
++                dist_val = (lx - rcx)**2 + (ly - rcy)**2
++                if dist_val < best_label_dist:
++                    best_label_dist = dist_val
++                    best_label_idx = l_idx
++                    
++        room_name = f"Room {i + 1}"
++        orig_x, orig_z = to_3d((x1+x2)/2, (y1+y2)/2)
++        
++        if best_label_idx != -1:
++            room_name = rooms_raw[best_label_idx]['name']
++            orig_x = rooms_raw[best_label_idx]['x']
++            orig_z = rooms_raw[best_label_idx]['z']
++            used_labels.add(best_label_idx)
++            
++        rx1, rz1 = to_3d(x1, y1)
++        rx2, rz2 = to_3d(x2, y2)
++        
++        final_rooms.append({
++            "name": room_name,
++            "x": orig_x, "z": orig_z,
++            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
++            "polygon": [
++                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
++                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
++            ]
++        })
++        
++    return final_rooms
+ 
+ 
+ def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.
+
+---NEXT---
+
+Created At: 2026-06-26T11:42:36+05:30
+Completed At: 2026-06-26T11:42:36+05:30
+File Path: `file:///C:/Users/Mehak/OneDrive/Desktop/Floor%20to%203D/floor_to_3d/backend/app/services/vision/algorithms.py`
+Total Lines: 758
+Total Bytes: 31932
+Showing lines 1 to 165
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import cv2
+2: import os
+3: 
+4: def _expand_rooms_v5(rooms_raw, wall_mask, wall_thickness, height, width):
+5:     """
+6:     v5 pipeline:
+7:     - If OCR labels exist, perfectly preserves V4 behavior by delegating to _expand_rooms_v4.
+8:     - If no OCR labels exist, uses a robust fallback:
+9:       1. Detect solid building footprint (heavily close walls -> largest contour).
+10:       2. Find connected free-space components (enclosed rooms).
+11:       3. Expand exactly ONE rectangle per component to prevent duplicates.
+12:     """
+13:     import numpy as np
+14:     import cv2
+15:     import os
+16: 
+17:     # 1. Perfectly preserve V4 logic for labeled blueprints
+18:     if len(rooms_raw) > 0:
+19:         return _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width)
+20: 
+21:     # 2. Fallback logic for unlabeled blueprints
+22:     os.makedirs("uploads/debug", exist_ok=True)
+23:     cv2.imwrite("uploads/debug/v5_walls.png", wall_mask)
+24:     
+25:     aspect = height / width
+26: 
+27:     def to_3d(px, py):
+28:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+29: 
+30:     # A) Detect solid building footprint
+31:     # Heavily close the wall mask to bridge large gaps (e.g. windows, open doors)
+32:     close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, wall_thickness * 5), max(50, wall_thickness * 5)))
+33:     closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel)
+34:     
+35:     contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+36:     building_mask = np.zeros_like(wall_mask)
+37:     if contours:
+38:         # Largest external contour represents the outer boundary of the building
+39:         largest_contour = max(contours, key=cv2.contourArea)
+40:         cv2.drawContours(building_mask, [largest_contour], -1, 255, -1)
+41:     else:
+42:         building_mask.fill(255)
+43:         
+44:     cv2.imwrite("uploads/debug/v5_building_mask.png", building_mask)
+45: 
+46:     # B) Free space strictly inside the building
+47:     free = (wall_mask == 0).astype(np.uint8) * 255
+48:     free = cv2.bitwise_and(free, building_mask)
+49:     
+50:     # Open the free space to sever thin connections between rooms (doorways)
+51:     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(5, wall_thickness), max(5, wall_thickness)))
+52:     free_opened = cv2.morphologyEx(free, cv2.MORPH_OPEN, open_kernel)
+53:     cv2.imwrite("uploads/debug/v5_free_opened.png", free_opened)
+54: 
+55:     # C) One tile per enclosed room
+56:     num_labels, comp_map = cv2.connectedComponents(free_opened)
+57:     min_room_area = max(100, int(height * width * 0.005))
+58:     
+59:     # Helper: 4-way expansion
+60:     def expand_from_point(cx, cy, current_free):
+61:         x1 = x2 = cx
+62:         y1 = y2 = cy
+63:         fl = fr = ft = fb = False
+64:         while not (fl and fr and ft and fb):
+65:             ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+66:             if not fl:
+67:                 if ox1 - 1 >= 0 and current_free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+68:                 else: fl = True
+69:             if not fr:
+70:                 if ox2 + 1 < width and current_free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+71:                 else: fr = True
+72:             if not ft:
+73:                 if oy1 - 1 >= 0 and current_free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+74:                 else: ft = True
+75:             if not fb:
+76:                 if oy2 + 1 < height and current_free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+77:                 else: fb = True
+78:             if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+79:         if x2 - x1 < 4 or y2 - y1 < 4: return None
+80:         return x1, y1, x2, y2
+81: 
+82:     valid_rooms = []
+83:     debug_rooms = cv2.cvtColor(free_opened, cv2.COLOR_GRAY2BGR)
+84: 
+85:     for cid in range(1, num_labels):
+86:         region_mask = (comp_map == cid).astype(np.uint8) * 255
+87:         area = cv2.countNonZero(region_mask)
+88:         
+89:         if area < min_room_area:
+90:             continue
+91:             
+92:         # Find deepest point inside THIS room component only
+93:         dist = cv2.distanceTransform(region_mask, cv2.DIST_L2, 5)
+94:         _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+95:         cx, cy = max_loc
+96:         
+97:         # Expand ONCE from the deepest point -> ensures 1 tile per room
+98:         rect = expand_from_point(cx, cy, free)
+99:         if rect:
+100:             x1, y1, x2, y2 = rect
+101:             
+102:             # Shave off edges slightly for visuals
+103:             x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+104:             if x2 > x1 and y2 > y1:
+105:                 valid_rooms.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2})
+106:                 cv2.rectangle(debug_rooms, (x1, y1), (x2, y2), (0, 255, 0), 2)
+107:                 
+108:     cv2.imwrite("uploads/debug/v5_final_rooms.png", debug_rooms)
+109: 
+110:     # D) Construct final output
+111:     final_rooms = []
+112:     for i, vr in enumerate(valid_rooms):
+113:         x1, y1, x2, y2 = vr['x1'], vr['y1'], vr['x2'], vr['y2']
+114:         
+115:         orig_x, orig_z = to_3d((x1+x2)/2, (y1+y2)/2)
+116:         rx1, rz1 = to_3d(x1, y1)
+117:         rx2, rz2 = to_3d(x2, y2)
+118:         
+119:         final_rooms.append({
+120:             "name": f"Room {i + 1}",
+121:             "x": orig_x, "z": orig_z,
+122:             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+123:             "polygon": [
+124:                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+125:                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+126:             ]
+127:         })
+128:         
+129:     return final_rooms
+130: 
+131: 
+132: def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+133:     """
+134:     v4 pipeline:
+135:     Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
+136:     while keeping the v4 debug logs.
+137:     """
+138:     from collections import deque, defaultdict
+139:     import numpy as np
+140:     import cv2
+141:     import os
+142:     
+143:     os.makedirs("uploads/debug", exist_ok=True)
+144:     
+145:     # 1. Debug Wall Mask
+146:     cv2.imwrite("uploads/debug/walls.png", wall_mask)
+147:     
+148:     aspect = height / width
+149:     
+150:     def to_px(nx, nz):
+151:         px = int((nx + 10) / 20 * width)
+152:         py = int((nz / aspect + 10) / 20 * height)
+153:         return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+154: 
+155:     def to_3d(px, py):
+156:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+157: 
+158:     # 1. Wall Extraction -> Free space
+159:     free = (wall_mask == 0).astype(np.uint8) * 255
+160:     
+161:     # 2. Room Extraction -> Distance Transform Cores
+162:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+163:     
+164:     # Senior Dev Fix: Smooth the distance transform to remove local noise.
+165:     dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.
+
+
+---NEXT---
+
+Created At: 2026-06-26T12:09:23+05:30
+Completed At: 2026-06-26T12:09:23+05:30
+The following changes were made by the replace_file_content tool to: C:\Users\Mehak\OneDrive\Desktop\Floor to 3D\floor_to_3d\backend\app\services\vision\algorithms.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -4,132 +4,246 @@
+ def _expand_rooms_v5(rooms_raw, wall_mask, wall_thickness, height, width):
+     """
+     v5 pipeline:
+-    - If OCR labels exist, perfectly preserves V4 behavior by delegating to _expand_rooms_v4.
+-    - If no OCR labels exist, uses a robust fallback:
+-      1. Detect solid building footprint (heavily close walls -> largest contour).
+-      2. Find connected free-space components (enclosed rooms).
+-      3. Expand exactly ONE rectangle per component to prevent duplicates.
+-    """
+-    import numpy as np
+-    import cv2
+-    import os
+-
+-    # 1. Perfectly preserve V4 logic for labeled blueprints
+-    if len(rooms_raw) > 0:
+-        return _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width)
+-
+-    # 2. Fallback logic for unlabeled blueprints
+-    os.makedirs("uploads/debug", exist_ok=True)
+-    cv2.imwrite("uploads/debug/v5_walls.png", wall_mask)
+-    
+-    aspect = height / width
+-
+-    def to_3d(px, py):
+-        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+-
+-    # A) Detect solid building footprint
+-    # Heavily close the wall mask to bridge large gaps (e.g. windows, open doors)
+-    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, wall_thickness * 5), max(50, wall_thickness * 5)))
+-    closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel)
+-    
+-    contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+-    building_mask = np.zeros_like(wall_mask)
+-    if contours:
+-        # Largest external contour represents the outer boundary of the building
+-        largest_contour = max(contours, key=cv2.contourArea)
+-        cv2.drawContours(building_mask, [largest_contour], -1, 255, -1)
+-    else:
+-        building_mask.fill(255)
+-        
+-    cv2.imwrite("uploads/debug/v5_building_mask.png", building_mask)
+-
+-    # B) Free space strictly inside the building
+-    free = (wall_mask == 0).astype(np.uint8) * 255
+-    free = cv2.bitwise_and(free, building_mask)
+-    
+-    # Open the free space to sever thin connections between rooms (doorways)
+-    # Use a gentler kernel to avoid erasing narrow rooms like hallways
+-    open_k = max(3, wall_thickness // 2)
+-    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k))
+-    free_opened = cv2.morphologyEx(free, cv2.MORPH_OPEN, open_kernel)
+-    cv2.imwrite("uploads/debug/v5_free_opened.png", free_opened)
+-
+-    # C) One tile per enclosed room
+-    num_labels, comp_map = cv2.connectedComponents(free_opened)
+-    # Lower the area threshold to ensure small rooms/closets are not skipped
+-    min_room_area = max(50, int(height * width * 0.001))
+-    
+-    # Helper: 4-way expansion
+-    def expand_from_point(cx, cy, current_free):
+-        x1 = x2 = cx
+-        y1 = y2 = cy
+-        fl = fr = ft = fb = False
+-        while not (fl and fr and ft and fb):
+-            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+-            if not fl:
+-                if ox1 - 1 >= 0 and current_free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+-                else: fl = True
+-            if not fr:
+-                if ox2 + 1 < width and current_free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+-                else: fr = True
+-            if not ft:
+-                if oy1 - 1 >= 0 and current_free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+-                else: ft = True
+-            if not fb:
+-                if oy2 + 1 < height and current_free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+-                else: fb = True
+-            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+-        if x2 - x1 < 4 or y2 - y1 < 4: return None
+-        return x1, y1, x2, y2
+-
+-    valid_rooms = []
+-    debug_rooms = cv2.cvtColor(free_opened, cv2.COLOR_GRAY2BGR)
+-
+-    for cid in range(1, num_labels):
+-        region_mask = (comp_map == cid).astype(np.uint8) * 255
+-        area = cv2.countNonZero(region_mask)
+-        
+-        if area < min_room_area:
+-            continue
+-            
+-        # Find deepest point inside THIS room component only
+-        dist = cv2.distanceTransform(region_mask, cv2.DIST_L2, 5)
+-        _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+-        cx, cy = max_loc
+-        
+-        # Expand ONCE from the deepest point -> ensures 1 tile per room
+-        rect = expand_from_point(cx, cy, free)
+-        if rect:
+-            x1, y1, x2, y2 = rect
+-            
+-            # Shave off edges slightly for visuals
+-            x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+-            if x2 > x1 and y2 > y1:
+-                valid_rooms.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2})
+-                cv2.rectangle(debug_rooms, (x1, y1), (x2, y2), (0, 255, 0), 2)
+-                
+-    cv2.imwrite("uploads/debug/v5_final_rooms.png", debug_rooms)
+-
+-    # D) Construct final output
+-    final_rooms = []
+-    for i, vr in enumerate(valid_rooms):
+-        x1, y1, x2, y2 = vr['x1'], vr['y1'], vr['x2'], vr['y2']
+-        
+-        orig_x, orig_z = to_3d((x1+x2)/2, (y1+y2)/2)
+-        rx1, rz1 = to_3d(x1, y1)
+-        rx2, rz2 = to_3d(x2, y2)
+-        
+-        final_rooms.append({
+-            "name": f"Room {i + 1}",
+-            "x": orig_x, "z": orig_z,
+-            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+-            "polygon": [
+-                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+-                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+-            ]
+-        })
+-        
+-    return final_rooms
++    Copy of v4 with added fallback for unlabeled blueprints.
++    When OCR finds labels → behaves identically to v4.
++    When no labels are found → auto-generates room seeds from distance transform cores.
++    """
++    from collections import deque, defaultdict
++    import numpy as np
++    import cv2
++    import os
++    
++    os.makedirs("uploads/debug", exist_ok=True)
++    
++    # Ensure rooms_raw is a mutable list (needed for fallback append)
++    rooms_raw = list(rooms_raw)
++    
++    # 1. Debug Wall Mask
++    cv2.imwrite("uploads/debug/walls.png", wall_mask)
++    
++    aspect = height / width
++    
++    def to_px(nx, nz):
++        px = int((nx + 10) / 20 * width)
++        py = int((nz / aspect + 10) / 20 * height)
++        return max(0, min(width - 1, px)), max(0, min(height - 1, py))
++
++    def to_3d(px, py):
++        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
++
++    # 1. Wall Extraction -> Free space
++    free = (wall_mask == 0).astype(np.uint8) * 255
++    
++    # 2. Room Extraction -> Distance Transform Cores
++    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
++    
++    # Senior Dev Fix: Smooth the distance transform to remove local noise.
++    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
++    
++    # Find local maxima (peaks of rooms)
++    local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
++    
++    # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
++    core_threshold = 2
++    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
++    cores = cv2.dilate(cores, np.ones((3,3)))
++    
++    # Debug: save cores to verify hallway is connected
++    cv2.imwrite("uploads/debug/room_cores.png", cores)
++    
++    num_labels, comp_map = cv2.connectedComponents(cores)
++    
++    # Core BFS to partition free space (Voronoi of cores)
++    queue = deque()
++    region_map = np.zeros_like(comp_map, dtype=np.int32)
++    
++    ys, xs = np.where(comp_map > 0)
++    for y, x in zip(ys, xs):
++        queue.append((x, y, comp_map[y, x]))
++        region_map[y, x] = comp_map[y, x]
++        
++    while queue:
++        x, y, cid = queue.popleft()
++        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
++            nx, ny = x + dx, y + dy
++            if 0 <= nx < width and 0 <= ny < height:
++                if free[ny, nx] > 0 and region_map[ny, nx] == 0:
++                    region_map[ny, nx] = cid
++                    queue.append((nx, ny, cid))
++                    
++    # 3. Label-to-Room Matching
++    core_to_labels = defaultdict(list)
++    for idx, room in enumerate(rooms_raw):
++        sx, sy = to_px(room['x'], room['z'])
++        cid = region_map[sy, sx]
++        
++        if cid == 0:
++            # OCR label landed on a wall or outside. Radial search for nearest region.
++            found = 0
++            for r in range(1, int(min(width, height) * 0.1), 2):
++                y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
++                x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
++                roi = region_map[y_min:y_max+1, x_min:x_max+1]
++                if np.any(roi > 0):
++                    ys_roi, xs_roi = np.where(roi > 0)
++                    ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
++                    dists = (xs_global - sx)**2 + (ys_global - sy)**2
++                    min_idx = np.argmin(dists)
++                    found = region_map[ys_global[min_idx], xs_global[min_idx]]
++                    break
++            cid = found
++            
++        if cid > 0:
++            core_to_labels[cid].append((idx, sx, sy))
++            
++    # 4. Region Generation & Open-Plan Sub-partitioning
++    room_masks = {}
++    for cid, labels in core_to_labels.items():
++        core_mask = (region_map == cid)
++        if len(labels) == 1:
++            room_masks[labels[0][0]] = core_mask
++        else:
++            # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
++            ys, xs = np.where(core_mask)
++            pts = np.column_stack((xs, ys)) # (N, 2)
++            label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
++            # dists shape: (N, K)
++            dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
++            closest_idx = np.argmin(dists, axis=1)
++            
++            for i, l in enumerate(labels):
++                idx = l[0]
++                sub_mask = np.zeros_like(core_mask, dtype=bool)
++                sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
++                room_masks[idx] = sub_mask
++
++    # ── v5 NEW: Fallback for unlabeled blueprints ─────────────────────────────
++    # When OCR found no labels, room_masks is empty. Auto-generate room seeds
++    # from distance transform core peaks (geometry-only room detection).
++    if not room_masks:
++        min_room_area = max(100, int(height * width * 0.005))
++        for cid in range(1, num_labels):
++            region_mask = (region_map == cid)
++            area = int(region_mask.sum())
++            
++            if area < min_room_area:
++                continue  # Skip noise — too small to be a real room
++            
++            # Find the deepest point in this region (furthest from walls)
++            dist_region = dist_smooth.copy()
++            dist_region[~region_mask] = 0
++            peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
++            cy_auto, cx_auto = int(peak[0]), int(peak[1])
++            
++            auto_idx = len(rooms_raw)
++            x3d, z3d = to_3d(cx_auto, cy_auto)
++            rooms_raw.append({"name": f"Room {auto_idx + 1}", "x": x3d, "z": z3d})
++            room_masks[auto_idx] = region_mask
++    # ── end v5 fallback ───────────────────────────────────────────────────────
++
++    # Helper: 4-way expansion (Frozen as requested)
++    def expand_from_point(cx, cy):
++        x1 = x2 = cx
++        y1 = y2 = cy
++        fl = fr = ft = fb = False
++        while not (fl and fr and ft and fb):
++            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
++            if not fl:
++                if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
++                else: fl = True
++            if not fr:
++                if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
++                else: fr = True
++            if not ft:
++                if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
++                else: ft = True
++            if not fb:
++                if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
++                else: fb = True
++            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
++        if x2 - x1 < 4 or y2 - y1 < 4: return None
++        return x1, y1, x2, y2
++
++    expanded = []
++
++    expanded_dict = {}
++
++    # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
++    sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
++
++    # Debug: Overlay container
++    for idx, room in sorted_rooms_with_indices:
++        sx, sy = to_px(room['x'], room['z'])
++        clean_name = "".join(c for c in room['name'] if c.isalnum())
++        
++        has_expanded = False
++        if idx in room_masks:
++            mask = room_masks[idx]
++            if not np.any(mask):
++                expanded_dict[idx] = room
++                continue
++            
++            # Prefer starting at the original label position if it's inside the mask and free
++            if mask[sy, sx] and free[sy, sx] != 0:
++                cx, cy = sx, sy
++            else:
++                # Find centroid of this specific room's region
++                M = cv2.moments(mask.astype(np.uint8))
++                if M["m00"] != 0:
++                    cx = int(M["m10"] / M["m00"])
++                    cy = int(M["m01"] / M["m00"])
++                else:
++                    cx, cy = sx, sy
++                    
++                # If centroid is outside the mask, snap to nearest pixel IN mask
++                if not mask[cy, cx]:
++                    ys, xs = np.where(mask)
++                    dists = (xs - cx)**2 + (ys - cy)**2
++                    min_idx = np.argmin(dists)
++                    cx, cy = xs[min_idx], ys[min_idx]
++                
++            # DEBUG IMAGE: Overlay
++            debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
++            debug_img[mask] = [0, 255, 0] # Green mask
++            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
++            
++            if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
++                rect = expand_from_point(cx, cy)
++                if rect:
++                    x1, y1, x2, y2 = rect
++                    
++                    # Mark the expanded region as occupied in the free mask to prevent overlap
++                    free[y1:y2+1, x1:x2+1] = 0
++                    
++                    x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
++                    
++                    # Debug: draw rectangle
++                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
++                    
++                    if x2 - x1 >= 4 and y2 - y1 >= 4:
++                        rx1, rz1 = to_3d(x1, y1)
++                        rx2, rz2 = to_3d(x2, y2)
++                        expanded_dict[idx] = {
++                            "name": room['name'],
++                            "x": room['x'], "z": room['z'],
++                            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
++                            "polygon": [
++                                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
++                                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
++                            ],
++                        }
++                        cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
++                        has_expanded = True
++                        
++            if not has_expanded:
++                cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
++                
++        if not has_expanded:
++            expanded_dict[idx] = room
++            
++    # Reconstruct the expanded list in the original order of rooms_raw
++    expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
++    return expanded
+ 
+ 
+ def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.
+
+---NEXT---
+
+Created At: 2026-06-26T12:17:02+05:30
+Completed At: 2026-06-26T12:17:02+05:30
+The following changes were made by the replace_file_content tool to: C:\Users\Mehak\OneDrive\Desktop\Floor to 3D\floor_to_3d\backend\app\services\vision\algorithms.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -4,246 +4,129 @@
+ def _expand_rooms_v5(rooms_raw, wall_mask, wall_thickness, height, width):
+     """
+     v5 pipeline:
+-    Copy of v4 with added fallback for unlabeled blueprints.
+-    When OCR finds labels → behaves identically to v4.
+-    When no labels are found → auto-generates room seeds from distance transform cores.
+-    """
+-    from collections import deque, defaultdict
+-    import numpy as np
+-    import cv2
+-    import os
+-    
+-    os.makedirs("uploads/debug", exist_ok=True)
+-    
+-    # Ensure rooms_raw is a mutable list (needed for fallback append)
+-    rooms_raw = list(rooms_raw)
+-    
+-    # 1. Debug Wall Mask
+-    cv2.imwrite("uploads/debug/walls.png", wall_mask)
+-    
+-    aspect = height / width
+-    
+-    def to_px(nx, nz):
+-        px = int((nx + 10) / 20 * width)
+-        py = int((nz / aspect + 10) / 20 * height)
+-        return max(0, min(width - 1, px)), max(0, min(height - 1, py))
+-
+-    def to_3d(px, py):
+-        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+-
+-    # 1. Wall Extraction -> Free space
+-    free = (wall_mask == 0).astype(np.uint8) * 255
+-    
+-    # 2. Room Extraction -> Distance Transform Cores
+-    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+-    
+-    # Senior Dev Fix: Smooth the distance transform to remove local noise.
+-    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+-    
+-    # Find local maxima (peaks of rooms)
+-    local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
+-    
+-    # Lower threshold significantly so narrow rooms (Entrance, Balcony) always get cores.
+-    core_threshold = 2
+-    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+-    cores = cv2.dilate(cores, np.ones((3,3)))
+-    
+-    # Debug: save cores to verify hallway is connected
+-    cv2.imwrite("uploads/debug/room_cores.png", cores)
+-    
+-    num_labels, comp_map = cv2.connectedComponents(cores)
+-    
+-    # Core BFS to partition free space (Voronoi of cores)
+-    queue = deque()
+-    region_map = np.zeros_like(comp_map, dtype=np.int32)
+-    
+-    ys, xs = np.where(comp_map > 0)
+-    for y, x in zip(ys, xs):
+-        queue.append((x, y, comp_map[y, x]))
+-        region_map[y, x] = comp_map[y, x]
+-        
+-    while queue:
+-        x, y, cid = queue.popleft()
+-        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+-            nx, ny = x + dx, y + dy
+-            if 0 <= nx < width and 0 <= ny < height:
+-                if free[ny, nx] > 0 and region_map[ny, nx] == 0:
+-                    region_map[ny, nx] = cid
+-                    queue.append((nx, ny, cid))
+-                    
+-    # 3. Label-to-Room Matching
+-    core_to_labels = defaultdict(list)
+-    for idx, room in enumerate(rooms_raw):
+-        sx, sy = to_px(room['x'], room['z'])
+-        cid = region_map[sy, sx]
+-        
+-        if cid == 0:
+-            # OCR label landed on a wall or outside. Radial search for nearest region.
+-            found = 0
+-            for r in range(1, int(min(width, height) * 0.1), 2):
+-                y_min = max(0, sy - r); y_max = min(height - 1, sy + r)
+-                x_min = max(0, sx - r); x_max = min(width - 1, sx + r)
+-                roi = region_map[y_min:y_max+1, x_min:x_max+1]
+-                if np.any(roi > 0):
+-                    ys_roi, xs_roi = np.where(roi > 0)
+-                    ys_global = ys_roi + y_min; xs_global = xs_roi + x_min
+-                    dists = (xs_global - sx)**2 + (ys_global - sy)**2
+-                    min_idx = np.argmin(dists)
+-                    found = region_map[ys_global[min_idx], xs_global[min_idx]]
+-                    break
+-            cid = found
+-            
+-        if cid > 0:
+-            core_to_labels[cid].append((idx, sx, sy))
+-            
+-    # 4. Region Generation & Open-Plan Sub-partitioning
+-    room_masks = {}
+-    for cid, labels in core_to_labels.items():
+-        core_mask = (region_map == cid)
+-        if len(labels) == 1:
+-            room_masks[labels[0][0]] = core_mask
+-        else:
+-            # Multiple labels in one room (Open Plan!) -> Sub-partition using Voronoi
+-            ys, xs = np.where(core_mask)
+-            pts = np.column_stack((xs, ys)) # (N, 2)
+-            label_pts = np.array([[l[1], l[2]] for l in labels]) # (K, 2)
+-            # dists shape: (N, K)
+-            dists = np.sum((pts[:, None, :] - label_pts[None, :, :])**2, axis=2)
+-            closest_idx = np.argmin(dists, axis=1)
+-            
+-            for i, l in enumerate(labels):
+-                idx = l[0]
+-                sub_mask = np.zeros_like(core_mask, dtype=bool)
+-                sub_mask[ys[closest_idx == i], xs[closest_idx == i]] = True
+-                room_masks[idx] = sub_mask
+-
+-    # ── v5 NEW: Fallback for unlabeled blueprints ─────────────────────────────
+-    # When OCR found no labels, room_masks is empty. Auto-generate room seeds
+-    # from distance transform core peaks (geometry-only room detection).
+-    if not room_masks:
+-        min_room_area = max(100, int(height * width * 0.005))
+-        for cid in range(1, num_labels):
+-            region_mask = (region_map == cid)
+-            area = int(region_mask.sum())
+-            
+-            if area < min_room_area:
+-                continue  # Skip noise — too small to be a real room
+-            
+-            # Find the deepest point in this region (furthest from walls)
+-            dist_region = dist_smooth.copy()
+-            dist_region[~region_mask] = 0
+-            peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
+-            cy_auto, cx_auto = int(peak[0]), int(peak[1])
+-            
+-            auto_idx = len(rooms_raw)
+-            x3d, z3d = to_3d(cx_auto, cy_auto)
+-            rooms_raw.append({"name": f"Room {auto_idx + 1}", "x": x3d, "z": z3d})
+-            room_masks[auto_idx] = region_mask
+-    # ── end v5 fallback ───────────────────────────────────────────────────────
+-
+-    # Helper: 4-way expansion (Frozen as requested)
+-    def expand_from_point(cx, cy):
+-        x1 = x2 = cx
+-        y1 = y2 = cy
+-        fl = fr = ft = fb = False
+-        while not (fl and fr and ft and fb):
+-            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+-            if not fl:
+-                if ox1 - 1 >= 0 and free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+-                else: fl = True
+-            if not fr:
+-                if ox2 + 1 < width and free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+-                else: fr = True
+-            if not ft:
+-                if oy1 - 1 >= 0 and free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+-                else: ft = True
+-            if not fb:
+-                if oy2 + 1 < height and free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+-                else: fb = True
+-            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+-        if x2 - x1 < 4 or y2 - y1 < 4: return None
+-        return x1, y1, x2, y2
+-
+-    expanded = []
+-
+-    expanded_dict = {}
+-
+-    # Sort rooms by name alphabetically (case-insensitive) to determine expansion order preference
+-    sorted_rooms_with_indices = sorted(enumerate(rooms_raw), key=lambda x: x[1]['name'].lower())
+-
+-    # Debug: Overlay container
+-    for idx, room in sorted_rooms_with_indices:
+-        sx, sy = to_px(room['x'], room['z'])
+-        clean_name = "".join(c for c in room['name'] if c.isalnum())
+-        
+-        has_expanded = False
+-        if idx in room_masks:
+-            mask = room_masks[idx]
+-            if not np.any(mask):
+-                expanded_dict[idx] = room
+-                continue
+-            
+-            # Prefer starting at the original label position if it's inside the mask and free
+-            if mask[sy, sx] and free[sy, sx] != 0:
+-                cx, cy = sx, sy
+-            else:
+-                # Find centroid of this specific room's region
+-                M = cv2.moments(mask.astype(np.uint8))
+-                if M["m00"] != 0:
+-                    cx = int(M["m10"] / M["m00"])
+-                    cy = int(M["m01"] / M["m00"])
+-                else:
+-                    cx, cy = sx, sy
+-                    
+-                # If centroid is outside the mask, snap to nearest pixel IN mask
+-                if not mask[cy, cx]:
+-                    ys, xs = np.where(mask)
+-                    dists = (xs - cx)**2 + (ys - cy)**2
+-                    min_idx = np.argmin(dists)
+-                    cx, cy = xs[min_idx], ys[min_idx]
+-                
+-            # DEBUG IMAGE: Overlay
+-            debug_img = cv2.cvtColor((mask.astype(np.uint8) * 255), cv2.COLOR_GRAY2BGR)
+-            debug_img[mask] = [0, 255, 0] # Green mask
+-            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1) # Centroid red
+-            
+-            if 0 <= cx < width and 0 <= cy < height and free[cy, cx] != 0:
+-                rect = expand_from_point(cx, cy)
+-                if rect:
+-                    x1, y1, x2, y2 = rect
+-                    
+-                    # Mark the expanded region as occupied in the free mask to prevent overlap
+-                    free[y1:y2+1, x1:x2+1] = 0
+-                    
+-                    x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+-                    
+-                    # Debug: draw rectangle
+-                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 0), 2) # Blue rectangle
+-                    
+-                    if x2 - x1 >= 4 and y2 - y1 >= 4:
+-                        rx1, rz1 = to_3d(x1, y1)
+-                        rx2, rz2 = to_3d(x2, y2)
+-                        expanded_dict[idx] = {
+-                            "name": room['name'],
+-                            "x": room['x'], "z": room['z'],
+-                            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+-                            "polygon": [
+-                                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+-                                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+-                            ],
+-                        }
+-                        cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+-                        has_expanded = True
+-                        
+-            if not has_expanded:
+-                cv2.imwrite(f"uploads/debug/room_{clean_name}.png", debug_img)
+-                
+-        if not has_expanded:
+-            expanded_dict[idx] = room
+-            
+-    # Reconstruct the expanded list in the original order of rooms_raw
+-    expanded = [expanded_dict[i] for i in range(len(rooms_raw))]
+-    return expanded
++    - If OCR labels exist, perfectly preserves V4 behavior by delegating to _expand_rooms_v4.
++    - If no OCR labels exist, uses a robust fallback:
++      1. Detect solid building footprint (heavily close walls -> largest contour).
++      2. Find connected free-space components (enclosed rooms).
++      3. Expand exactly ONE rectangle per component to prevent duplicates.
++    """
++    import numpy as np
++    import cv2
++    import os
++
++    # 1. Perfectly preserve V4 logic for labeled blueprints
++    if len(rooms_raw) > 0:
++        return _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width)
++
++    # 2. Fallback logic for unlabeled blueprints
++    os.makedirs("uploads/debug", exist_ok=True)
++    cv2.imwrite("uploads/debug/v5_walls.png", wall_mask)
++    
++    aspect = height / width
++
++    def to_3d(px, py):
++        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
++
++    # A) Detect solid building footprint
++    # Heavily close the wall mask to bridge large gaps (e.g. windows, open doors)
++    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, wall_thickness * 5), max(50, wall_thickness * 5)))
++    closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel)
++    
++    contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
++    building_mask = np.zeros_like(wall_mask)
++    if contours:
++        # Largest external contour represents the outer boundary of the building
++        largest_contour = max(contours, key=cv2.contourArea)
++        cv2.drawContours(building_mask, [largest_contour], -1, 255, -1)
++    else:
++        building_mask.fill(255)
++        
++    cv2.imwrite("uploads/debug/v5_building_mask.png", building_mask)
++
++    # B) Free space strictly inside the building
++    free = (wall_mask == 0).astype(np.uint8) * 255
++    free = cv2.bitwise_and(free, building_mask)
++    
++    # Open the free space to sever thin connections between rooms (doorways)
++    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(5, wall_thickness), max(5, wall_thickness)))
++    free_opened = cv2.morphologyEx(free, cv2.MORPH_OPEN, open_kernel)
++    cv2.imwrite("uploads/debug/v5_free_opened.png", free_opened)
++
++    # C) One tile per enclosed room
++    num_labels, comp_map = cv2.connectedComponents(free_opened)
++    min_room_area = max(100, int(height * width * 0.005))
++    
++    # Helper: 4-way expansion
++    def expand_from_point(cx, cy, current_free):
++        x1 = x2 = cx
++        y1 = y2 = cy
++        fl = fr = ft = fb = False
++        while not (fl and fr and ft and fb):
++            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
++            if not fl:
++                if ox1 - 1 >= 0 and current_free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
++                else: fl = True
++            if not fr:
++                if ox2 + 1 < width and current_free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
++                else: fr = True
++            if not ft:
++                if oy1 - 1 >= 0 and current_free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
++                else: ft = True
++            if not fb:
++                if oy2 + 1 < height and current_free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
++                else: fb = True
++            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
++        if x2 - x1 < 4 or y2 - y1 < 4: return None
++        return x1, y1, x2, y2
++
++    valid_rooms = []
++    debug_rooms = cv2.cvtColor(free_opened, cv2.COLOR_GRAY2BGR)
++
++    for cid in range(1, num_labels):
++        region_mask = (comp_map == cid).astype(np.uint8) * 255
++        area = cv2.countNonZero(region_mask)
++        
++        if area < min_room_area:
++            continue
++            
++        # Find deepest point inside THIS room component only
++        dist = cv2.distanceTransform(region_mask, cv2.DIST_L2, 5)
++        _, max_val, _, max_loc = cv2.minMaxLoc(dist)
++        cx, cy = max_loc
++        
++        # Expand ONCE from the deepest point -> ensures 1 tile per room
++        rect = expand_from_point(cx, cy, free)
++        if rect:
++            x1, y1, x2, y2 = rect
++            
++            # Shave off edges slightly for visuals
++            x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
++            if x2 > x1 and y2 > y1:
++                valid_rooms.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2})
++                cv2.rectangle(debug_rooms, (x1, y1), (x2, y2), (0, 255, 0), 2)
++                
++    cv2.imwrite("uploads/debug/v5_final_rooms.png", debug_rooms)
++
++    # D) Construct final output
++    final_rooms = []
++    for i, vr in enumerate(valid_rooms):
++        x1, y1, x2, y2 = vr['x1'], vr['y1'], vr['x2'], vr['y2']
++        
++        orig_x, orig_z = to_3d((x1+x2)/2, (y1+y2)/2)
++        rx1, rz1 = to_3d(x1, y1)
++        rx2, rz2 = to_3d(x2, y2)
++        
++        final_rooms.append({
++            "name": f"Room {i + 1}",
++            "x": orig_x, "z": orig_z,
++            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
++            "polygon": [
++                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
++                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
++            ]
++        })
++        
++    return final_rooms
+ 
+ 
+ def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.
+
+---NEXT---
+
+Created At: 2026-06-26T14:39:13+05:30
+Completed At: 2026-06-26T14:39:13+05:30
+File Path: `file:///C:/Users/Mehak/OneDrive/Desktop/Floor%20to%203D/floor_to_3d/backend/app/services/vision/algorithms.py`
+Total Lines: 775
+Total Bytes: 32563
+Showing lines 1 to 150
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import cv2
+2: import os
+3: 
+4: def _expand_rooms_v5(rooms_raw, wall_mask, wall_thickness, height, width):
+5:     """
+6:     v5 pipeline (The Ultimate Architecture):
+7:     - If OCR labels exist, preserves V4 behavior perfectly.
+8:     - If no OCR labels exist, uses a hybrid geometry fallback:
+9:       1. Building mask to strictly prevent outside rooms.
+10:       2. Distance transform cores to find ALL rooms (prevents missing small rooms/hallways).
+11:       3. Expands from deepest cores first, marking space as occupied to prevent duplicate tiles.
+12:     """
+13:     import numpy as np
+14:     import cv2
+15:     import os
+16: 
+17:     if len(rooms_raw) > 0:
+18:         return _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width)
+19: 
+20:     os.makedirs("uploads/debug", exist_ok=True)
+21:     cv2.imwrite("uploads/debug/v5_walls.png", wall_mask)
+22:     
+23:     aspect = height / width
+24: 
+25:     def to_3d(px, py):
+26:         return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+27: 
+28:     # 1. Solid building footprint to prevent outside detections
+29:     close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, wall_thickness * 5), max(50, wall_thickness * 5)))
+30:     closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel)
+31:     
+32:     contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+33:     building_mask = np.zeros_like(wall_mask)
+34:     if contours:
+35:         largest_contour = max(contours, key=cv2.contourArea)
+36:         cv2.drawContours(building_mask, [largest_contour], -1, 255, -1)
+37:     else:
+38:         building_mask.fill(255)
+39:         
+40:     cv2.imwrite("uploads/debug/v5_building_mask.png", building_mask)
+41: 
+42:     # 2. Free space restricted to inside the building
+43:     free = (wall_mask == 0).astype(np.uint8) * 255
+44:     free = cv2.bitwise_and(free, building_mask)
+45:     
+46:     # 3. Robust Room Detection using Distance Transform (prevents missing small rooms)
+47:     dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+48:     dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
+49:     
+50:     local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
+51:     core_threshold = 2
+52:     cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
+53:     cores = cv2.dilate(cores, np.ones((3,3)))
+54:     
+55:     num_labels, comp_map = cv2.connectedComponents(cores)
+56:     
+57:     # Extract candidates from cores
+58:     candidates = []
+59:     for cid in range(1, num_labels):
+60:         region_mask = (comp_map == cid)
+61:         if region_mask.sum() == 0: continue
+62:             
+63:         dist_region = dist_smooth.copy()
+64:         dist_region[~region_mask] = 0
+65:         peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
+66:         cy, cx = int(peak[0]), int(peak[1])
+67:         score = dist_region[cy, cx]
+68:         candidates.append({'cx': cx, 'cy': cy, 'score': score})
+69:         
+70:     # Sort from largest/deepest room to smallest
+71:     candidates.sort(key=lambda c: c['score'], reverse=True)
+72: 
+73:     # Helper: 4-way expansion
+74:     def expand_from_point(cx, cy, current_free):
+75:         x1 = x2 = cx
+76:         y1 = y2 = cy
+77:         fl = fr = ft = fb = False
+78:         while not (fl and fr and ft and fb):
+79:             ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+80:             if not fl:
+81:                 if ox1 - 1 >= 0 and current_free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
+82:                 else: fl = True
+83:             if not fr:
+84:                 if ox2 + 1 < width and current_free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
+85:                 else: fr = True
+86:             if not ft:
+87:                 if oy1 - 1 >= 0 and current_free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
+88:                 else: ft = True
+89:             if not fb:
+90:                 if oy2 + 1 < height and current_free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
+91:                 else: fb = True
+92:             if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
+93:         if x2 - x1 < 4 or y2 - y1 < 4: return None
+94:         return x1, y1, x2, y2
+95: 
+96:     # 4. Expand rooms and prevent duplicates
+97:     working_free = free.copy()
+98:     valid_rooms = []
+99:     debug_rooms = cv2.cvtColor(free, cv2.COLOR_GRAY2BGR)
+100: 
+101:     for cand in candidates:
+102:         cx, cy = cand['cx'], cand['cy']
+103:         
+104:         # If this core is inside an area already occupied by a previous expansion,
+105:         # it's a noisy secondary core in the same room! Skip it to prevent duplicate tiles.
+106:         if working_free[cy, cx] == 0:
+107:             continue
+108:             
+109:         rect = expand_from_point(cx, cy, working_free)
+110:         if rect:
+111:             x1, y1, x2, y2 = rect
+112:             area = (x2 - x1) * (y2 - y1)
+113:             
+114:             # Minimum area check just to filter out severe noise
+115:             if area >= max(50, int(height * width * 0.0005)):
+116:                 # Mark as occupied so no other cores can spawn a room here
+117:                 working_free[y1:y2+1, x1:x2+1] = 0
+118:                 
+119:                 # Shave off edges for visuals
+120:                 x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
+121:                 if x2 > x1 and y2 > y1:
+122:                     valid_rooms.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2})
+123:                     cv2.rectangle(debug_rooms, (x1, y1), (x2, y2), (0, 255, 0), 2)
+124:                     
+125:     cv2.imwrite("uploads/debug/v5_final_rooms.png", debug_rooms)
+126: 
+127:     # 5. Construct final output
+128:     final_rooms = []
+129:     for i, vr in enumerate(valid_rooms):
+130:         x1, y1, x2, y2 = vr['x1'], vr['y1'], vr['x2'], vr['y2']
+131:         
+132:         orig_x, orig_z = to_3d((x1+x2)/2, (y1+y2)/2)
+133:         rx1, rz1 = to_3d(x1, y1)
+134:         rx2, rz2 = to_3d(x2, y2)
+135:         
+136:         final_rooms.append({
+137:             "name": f"Room {i + 1}",
+138:             "x": orig_x, "z": orig_z,
+139:             "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
+140:             "polygon": [
+141:                 {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
+142:                 {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
+143:             ]
+144:         })
+145:         
+146:     return final_rooms
+147: 
+148: 
+149: def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+150:     """
+The above content does NOT show the entire file contents. If you need to view any lines of the file which were not shown to complete your task, call this tool again to view those lines.
+
+
+---NEXT---
+
+Created At: 2026-06-26T14:39:37+05:30
+Completed At: 2026-06-26T14:39:37+05:30
+The following changes were made by the multi_replace_file_content tool to: C:\Users\Mehak\OneDrive\Desktop\Floor to 3D\floor_to_3d\backend\app\services\vision\algorithms.py. If relevant, proactively run terminal commands to execute this code for the USER. Don't ask for permission.
+[diff_block_start]
+@@ -146,6 +146,147 @@
+     return final_rooms
+ 
+ 
++def _expand_rooms_v6(rooms_raw, wall_mask, wall_thickness, height, width):
++    """
++    v6 pipeline (The Ultimate Architecture):
++    - Exact copy of v5, ready for new refinements.
++    """
++    import numpy as np
++    import cv2
++    import os
++
++    if len(rooms_raw) > 0:
++        return _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width)
++
++    os.makedirs("uploads/debug", exist_ok=True)
++    cv2.imwrite("uploads/debug/v6_walls.png", wall_mask)
++    
++    aspect = height / width
++
++    def to_3d(px, py):
++        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
++
++    # 1. Solid building footprint to prevent outside detections
++    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, wall_thickness * 5), max(50, wall_thickness * 5)))
++    closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel)
++    
++    contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
++    building_mask = np.zeros_like(wall_mask)
++    if contours:
++        largest_contour = max(contours, key=cv2.contourArea)
++        cv2.drawContours(building_mask, [largest_contour], -1, 255, -1)
++    else:
++        building_mask.fill(255)
++        
++    cv2.imwrite("uploads/debug/v6_building_mask.png", building_mask)
++
++    # 2. Free space restricted to inside the building
++    free = (wall_mask == 0).astype(np.uint8) * 255
++    free = cv2.bitwise_and(free, building_mask)
++    
++    # 3. Robust Room Detection using Distance Transform (prevents missing small rooms)
++    dist = cv2.distanceTransform(free, cv2.DIST_L2, 5)
++    dist_smooth = cv2.GaussianBlur(dist, (15, 15), 0)
++    
++    local_max = cv2.dilate(dist_smooth, np.ones((7,7)))
++    core_threshold = 2
++    cores = ((dist_smooth == local_max) & (dist_smooth > core_threshold)).astype(np.uint8) * 255
++    cores = cv2.dilate(cores, np.ones((3,3)))
++    
++    num_labels, comp_map = cv2.connectedComponents(cores)
++    
++    # Extract candidates from cores
++    candidates = []
++    for cid in range(1, num_labels):
++        region_mask = (comp_map == cid)
++        if region_mask.sum() == 0: continue
++            
++        dist_region = dist_smooth.copy()
++        dist_region[~region_mask] = 0
++        peak = np.unravel_index(np.argmax(dist_region), dist_region.shape)
++        cy, cx = int(peak[0]), int(peak[1])
++        score = dist_region[cy, cx]
++        candidates.append({'cx': cx, 'cy': cy, 'score': score})
++        
++    # Sort from largest/deepest room to smallest
++    candidates.sort(key=lambda c: c['score'], reverse=True)
++
++    # Helper: 4-way expansion
++    def expand_from_point(cx, cy, current_free):
++        x1 = x2 = cx
++        y1 = y2 = cy
++        fl = fr = ft = fb = False
++        while not (fl and fr and ft and fb):
++            ox1, oy1, ox2, oy2 = x1, y1, x2, y2
++            if not fl:
++                if ox1 - 1 >= 0 and current_free[oy1:oy2 + 1, ox1 - 1].all(): x1 = ox1 - 1
++                else: fl = True
++            if not fr:
++                if ox2 + 1 < width and current_free[oy1:oy2 + 1, ox2 + 1].all(): x2 = ox2 + 1
++                else: fr = True
++            if not ft:
++                if oy1 - 1 >= 0 and current_free[oy1 - 1, ox1:ox2 + 1].all(): y1 = oy1 - 1
++                else: ft = True
++            if not fb:
++                if oy2 + 1 < height and current_free[oy2 + 1, ox1:ox2 + 1].all(): y2 = oy2 + 1
++                else: fb = True
++            if x1 == ox1 and x2 == ox2 and y1 == oy1 and y2 == oy2: break
++        if x2 - x1 < 4 or y2 - y1 < 4: return None
++        return x1, y1, x2, y2
++
++    # 4. Expand rooms and prevent duplicates
++    working_free = free.copy()
++    valid_rooms = []
++    debug_rooms = cv2.cvtColor(free, cv2.COLOR_GRAY2BGR)
++
++    for cand in candidates:
++        cx, cy = cand['cx'], cand['cy']
++        
++        # If this core is inside an area already occupied by a previous expansion,
++        # it's a noisy secondary core in the same room! Skip it to prevent duplicate tiles.
++        if working_free[cy, cx] == 0:
++            continue
++            
++        rect = expand_from_point(cx, cy, working_free)
++        if rect:
++            x1, y1, x2, y2 = rect
++            area = (x2 - x1) * (y2 - y1)
++            
++            # Minimum area check just to filter out severe noise
++            if area >= max(50, int(height * width * 0.0005)):
++                # Mark as occupied so no other cores can spawn a room here
++                working_free[y1:y2+1, x1:x2+1] = 0
++                
++                # Shave off edges for visuals
++                x1 += 3; x2 -= 3; y1 += 3; y2 -= 3
++                if x2 > x1 and y2 > y1:
++                    valid_rooms.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2})
++                    cv2.rectangle(debug_rooms, (x1, y1), (x2, y2), (0, 255, 0), 2)
++                    
++    cv2.imwrite("uploads/debug/v6_final_rooms.png", debug_rooms)
++
++    # 5. Construct final output
++    final_rooms = []
++    for i, vr in enumerate(valid_rooms):
++        x1, y1, x2, y2 = vr['x1'], vr['y1'], vr['x2'], vr['y2']
++        
++        orig_x, orig_z = to_3d((x1+x2)/2, (y1+y2)/2)
++        rx1, rz1 = to_3d(x1, y1)
++        rx2, rz2 = to_3d(x2, y2)
++        
++        final_rooms.append({
++            "name": f"Room {i + 1}",
++            "x": orig_x, "z": orig_z,
++            "w": abs(rx2 - rx1), "h": abs(rz2 - rz1),
++            "polygon": [
++                {"x": rx1, "z": rz1}, {"x": rx2, "z": rz1},
++                {"x": rx2, "z": rz2}, {"x": rx1, "z": rz2},
++            ]
++        })
++        
++    return final_rooms
++
++
+ def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+     """
+     v4 pipeline:
+[diff_block_end]
+
+Please note that the above snippet only shows the MODIFIED lines from the last change. It shows up to 3 lines of unchanged lines before and after the modified lines. The actual file contents may have many more lines not shown.
+
+---NEXT---
+
+Created At: 2026-06-26T16:39:47+05:30
+Completed At: 2026-06-26T16:39:47+05:30
+
+				The command completed successfully.
+				Output:
+				326: def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
+327: """
+328: v4 pipeline:
+329: Updated with v3 improvements (lower core threshold, core-to-label nearest matching, fallback handling)
+330: while keeping the v4 debug logs.
+331: """
+332: from collections import deque, defaultdict
+333: import numpy as np
+334: import cv2
+335: import os
+336: 
+337: os.makedirs("uploads/debug", exist_ok=True)
+338: 
+339: # 1. Debug Wall Mask
+340: cv2.imwrite("uploads/debug/walls.png", wall_mask)
+341: 
+342: aspect = height / width
+343: 
+344: def to_px(nx, nz):
+345: px = int((nx + 10) / 20 * width)
+
+
+
+---NEXT---
+
