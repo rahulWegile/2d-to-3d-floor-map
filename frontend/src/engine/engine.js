@@ -922,20 +922,45 @@ function buildBuilding(floorsArr) {
 
         let fMinX = Infinity, fMaxX = -Infinity, fMinZ = Infinity, fMaxZ = -Infinity;
         let fHasWalls = false;
-        if (floor.walls) {
-            floor.walls.forEach(wall => {
-                // Support both {points:[{x,z},{x,z}]} and legacy {x1,y1,x2,y2} formats
-                const pts = wall.points && wall.points.length === 2
-                    ? wall.points
-                    : (wall.x1 != null ? [{x: wall.x1, z: wall.y1}, {x: wall.x2, z: wall.y2}] : null);
-                if (!pts) return;
-                fHasWalls = true;
-                fMinX = Math.min(fMinX, pts[0].x, pts[1].x);
-                fMaxX = Math.max(fMaxX, pts[0].x, pts[1].x);
-                fMinZ = Math.min(fMinZ, pts[0].z, pts[1].z);
-                fMaxZ = Math.max(fMaxZ, pts[0].z, pts[1].z);
+        
+        // Generate walls dynamically from rooms instead of using static floor.walls
+        const dynamicWalls = [];
+        const drawnWalls = new Set();
+        
+        if (floor.rooms) {
+            floor.rooms.forEach(room => {
+                if (room.polygon && room.polygon.length >= 3) {
+                    const pts = room.polygon;
+                    for (let i = 0; i < pts.length; i++) {
+                        const p1 = pts[i];
+                        const p2 = pts[(i + 1) % pts.length];
+                        
+                        // Round to avoid floating point precision issues causing duplicates
+                        const x1 = Math.round(p1.x * 100) / 100;
+                        const z1 = Math.round(p1.z * 100) / 100;
+                        const x2 = Math.round(p2.x * 100) / 100;
+                        const z2 = Math.round(p2.z * 100) / 100;
+                        
+                        // Sort points to create a unique, directionless key for this edge
+                        const key = (x1 < x2 || (x1 === x2 && z1 < z2)) 
+                            ? `${x1},${z1}-${x2},${z2}` 
+                            : `${x2},${z2}-${x1},${z1}`;
+                            
+                        if (!drawnWalls.has(key)) {
+                            drawnWalls.add(key);
+                            dynamicWalls.push({ p1, p2 });
+                            
+                            fHasWalls = true;
+                            fMinX = Math.min(fMinX, p1.x, p2.x);
+                            fMaxX = Math.max(fMaxX, p1.x, p2.x);
+                            fMinZ = Math.min(fMinZ, p1.z, p2.z);
+                            fMaxZ = Math.max(fMaxZ, p1.z, p2.z);
+                        }
+                    }
+                }
             });
         }
+        
         if (!fHasWalls) {
             fMinX = -10; fMaxX = 10;
             fMinZ = -10 * aspect; fMaxZ = 10 * aspect;
@@ -966,18 +991,12 @@ function buildBuilding(floorsArr) {
             });
         }
 
-        if (floor.walls) {
-            floor.walls.forEach(wall => {
-                // Support both {points:[{x,z},{x,z}]} and legacy {x1,y1,x2,y2} formats
-                const pts = wall.points && wall.points.length === 2
-                    ? wall.points
-                    : (wall.x1 != null ? [{x: wall.x1, z: wall.y1}, {x: wall.x2, z: wall.y2}] : null);
-                if (!pts) return;
-                const start = new THREE.Vector3(pts[0].x, 0, pts[0].z);
-                const end = new THREE.Vector3(pts[1].x, 0, pts[1].z);
-                createManualWall(start, end, newFloor);
-            });
-        }
+        // Draw the dynamically generated walls
+        dynamicWalls.forEach(wall => {
+            const start = new THREE.Vector3(wall.p1.x, 0, wall.p1.z);
+            const end = new THREE.Vector3(wall.p2.x, 0, wall.p2.z);
+            createManualWall(start, end, newFloor);
+        });
 
         if (floor.rooms) {
             floor.rooms.forEach(room => {
@@ -1259,19 +1278,42 @@ export async function uploadAndAddFloor(file) {
         
             let fMinX = Infinity, fMaxX = -Infinity, fMinZ = Infinity, fMaxZ = -Infinity;
             let fHasWalls = false;
-            if (floorData.walls) {
-                floorData.walls.forEach(wall => {
-                    const pts = wall.points && wall.points.length === 2
-                        ? wall.points
-                        : (wall.x1 != null ? [{x: wall.x1, z: wall.y1}, {x: wall.x2, z: wall.y2}] : null);
-                    if (!pts) return;
-                    fHasWalls = true;
-                    fMinX = Math.min(fMinX, pts[0].x, pts[1].x);
-                    fMaxX = Math.max(fMaxX, pts[0].x, pts[1].x);
-                    fMinZ = Math.min(fMinZ, pts[0].z, pts[1].z);
-                    fMaxZ = Math.max(fMaxZ, pts[0].z, pts[1].z);
+            
+            const dynamicWalls = [];
+            const drawnWalls = new Set();
+            
+            if (floorData.rooms) {
+                floorData.rooms.forEach(room => {
+                    if (room.polygon && room.polygon.length >= 3) {
+                        const pts = room.polygon;
+                        for (let i = 0; i < pts.length; i++) {
+                            const p1 = pts[i];
+                            const p2 = pts[(i + 1) % pts.length];
+                            
+                            const x1 = Math.round(p1.x * 100) / 100;
+                            const z1 = Math.round(p1.z * 100) / 100;
+                            const x2 = Math.round(p2.x * 100) / 100;
+                            const z2 = Math.round(p2.z * 100) / 100;
+                            
+                            const key = (x1 < x2 || (x1 === x2 && z1 < z2)) 
+                                ? `${x1},${z1}-${x2},${z2}` 
+                                : `${x2},${z2}-${x1},${z1}`;
+                                
+                            if (!drawnWalls.has(key)) {
+                                drawnWalls.add(key);
+                                dynamicWalls.push({ p1, p2 });
+                                
+                                fHasWalls = true;
+                                fMinX = Math.min(fMinX, p1.x, p2.x);
+                                fMaxX = Math.max(fMaxX, p1.x, p2.x);
+                                fMinZ = Math.min(fMinZ, p1.z, p2.z);
+                                fMaxZ = Math.max(fMaxZ, p1.z, p2.z);
+                            }
+                        }
+                    }
                 });
             }
+            
             if (!fHasWalls) {
                 fMinX = -10; fMaxX = 10;
                 fMinZ = -10 * aspect; fMaxZ = 10 * aspect;
@@ -1304,17 +1346,11 @@ export async function uploadAndAddFloor(file) {
                 });
             }
             
-            if (floorData.walls) {
-                floorData.walls.forEach(wall => {
-                    const pts = wall.points && wall.points.length === 2
-                        ? wall.points
-                        : (wall.x1 != null ? [{x: wall.x1, z: wall.y1}, {x: wall.x2, z: wall.y2}] : null);
-                    if (!pts) return;
-                    const start = new THREE.Vector3(pts[0].x, 0, pts[0].z);
-                    const end = new THREE.Vector3(pts[1].x, 0, pts[1].z);
-                    createManualWall(start, end, newFloor);
-                });
-            }
+            dynamicWalls.forEach(wall => {
+                const start = new THREE.Vector3(wall.p1.x, 0, wall.p1.z);
+                const end = new THREE.Vector3(wall.p2.x, 0, wall.p2.z);
+                createManualWall(start, end, newFloor);
+            });
             
             if (floorData.rooms) {
                 floorData.rooms.forEach(room => {
