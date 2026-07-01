@@ -1,0 +1,11 @@
+import requests
+
+url = 'http://localhost:8081/upload'
+files = {'files': open(r'c:\Users\Mehak\OneDrive\Desktop\Floor to 3D\image copy 5.png', 'rb')}
+r = requests.post(url, files=files)
+data = r.json()
+if 'floors' in data and len(data['floors']) > 0:
+    rooms = data['floors'][0].get('rooms', [])
+    print(f'API returned {len(rooms)} rooms')
+else:
+    print('No floors in response:', data)

@@ -1,0 +1,1 @@
+def _expand_rooms_v4(rooms_raw, wall_mask, wall_thickness, height, width):
