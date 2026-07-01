@@ -342,9 +342,8 @@ Return ONLY the raw JSON array. No markdown fences, no comments, no trailing com
                         ]
                     })
                 if nemotron_rooms:
-                    # Expand the AI-guessed center points to the exact OpenCV wall boundaries
-                    rooms = _expand_rooms_v7(nemotron_rooms, cleaned, wall_thickness, height, width)
-                    print("Hybrid Mode: Perfect OpenCV geometry + Nemotron labels & seeds!")
+                    rooms = nemotron_rooms
+                    print("100% AI Mode: Bypassed OpenCV geometry using Nemotron!")
         except Exception as e:
             print("Nemotron API error:", e)
 
