@@ -1,0 +1,203 @@
+
+> algorithms.py:1069:def _expand_rooms_v8_polygons(rooms_raw, wall_mask, wall_thickness, height, width, fallback_raw=None):
+  algorithms.py:1070:    """
+  algorithms.py:1071:    V8 Polygon Algorithm:
+  algorithms.py:1072:    1. OpenCV extracts perfect non-overlapping region masks (via distance transform & BFS).
+  algorithms.py:1073:    2. We extract the exact polygonal contours of these regions.
+  algorithms.py:1074:    3. We greedy-match Nemotron's hallucinated coordinates to the nearest valid OpenCV region.
+  algorithms.py:1075:    4. We return the exact room polygon to the frontend for perfect 3D rendering without overlaps or wall-crossing.
+  algorithms.py:1076:    """
+  algorithms.py:1077:    aspect = height / width
+  algorithms.py:1078:    def to_3d(px, py):
+  algorithms.py:1079:        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+  algorithms.py:1080:
+  algorithms.py:1081:    # 1. Solid building footprint to prevent outside detections
+  algorithms.py:1082:    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, int(wall_thickness * 5)), max(50, int(wall_thickness * 5))))
+  algorithms.py:1083:    closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel)
+  algorithms.py:1084:    contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+  algorithms.py:1085:    building_mask = np.zeros_like(wall_mask)
+  algorithms.py:1086:    if contours:
+  algorithms.py:1087:        largest_contour = max(contours, key=cv2.contourArea)
+  algorithms.py:1088:        cv2.drawContours(building_mask, [largest_contour], -1, 255, -1)
+  algorithms.py:1089:    else:
+  algorithms.py:1090:        building_mask.fill(255)
+  algorithms.py:1091:        
+  algorithms.py:1092:    wall_mask = wall_mask.copy()
+  algorithms.py:1093:    wall_mask[building_mask == 0] = 255
+  algorithms.py:1094:
+  algorithms.py:1095:    # 2. OpenCV Region Extraction
+  algorithms.py:1096:    free_space = (wall_mask == 0).astype(np.uint8) * 255
+  algorithms.py:1097:    
+  algorithms.py:1098:    # Smooth over furniture to find peaks correctly
+  algorithms.py:1099:    annot_k = max(3, min(int(round(wall_thickness * 0.35)), 9))
+  algorithms.py:1100:    if annot_k % 2 == 0: annot_k += 1
+  algorithms.py:1101:    small_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+  algorithms.py:1102:    large_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (annot_k, annot_k))
+  algorithms.py:1103:    smoothed_free = cv2.morphologyEx(free_space, cv2.MORPH_CLOSE, small_kernel)
+  algorithms.py:1104:    smoothed_free = cv2.morphologyEx(smoothed_free, cv2.MORPH_CLOSE, large_kernel)
+  algorithms.py:1105:    smoothed_free = cv2.morphologyEx(smoothed_free, cv2.MORPH_OPEN, small_kernel)
+  algorithms.py:1106:    
+  algorithms.py:1107:    dist = cv2.distanceTransform(smoothed_free, cv2.DIST_L2, 5)
+  algorithms.py:1108:    
+  algorithms.py:1109:    # Erode dist to find distinct room centers
+  algorithms.py:1110:    local_max = cv2.dilate(dist, np.ones((5, 5), np.uint8))
+  algorithms.py:1111:    peaks = (dist == local_max) & (dist > max(5, wall_thickness * 1.5))
+  algorithms.py:1112:    ys, xs = np.where(peaks)
+  algorithms.py:1113:    
+  algorithms.py:1114:    # Consolidate nearby peaks
+  algorithms.py:1115:    pts = list(zip(xs, ys))
+  algorithms.py:1116:    merged_peaks = []
+  algorithms.py:1117:    min_dist = max(20, wall_thickness * 3)
+  algorithms.py:1118:    for p in pts:
+  algorithms.py:1119:        if not any(np.hypot(p[0]-m[0], p[1]-m[1]) < min_dist for m in merged_peaks):
+  algorithms.py:1120:            merged_peaks.append(p)
+  algorithms.py:1121:            
+  algorithms.py:1122:    if not merged_peaks:
+  algorithms.py:1123:        return rooms_raw # Fallback if no rooms found
+  algorithms.py:1124:        
+  algorithms.py:1125:    # BFS to grow regions
+  algorithms.py:1126:    region_masks = [np.zeros((height, width), dtype=np.uint8) for _ in merged_peaks]
+  algorithms.py:1127:    from collections import deque
+  algorithms.py:1128:    q = deque()
+  algorithms.py:1129:    visited = np.zeros((height, width), dtype=bool)
+  algorithms.py:1130:    
+  algorithms.py:1131:    for i, (px, py) in enumerate(merged_peaks):
+  algorithms.py:1132:        q.append((px, py, i))
+  algorithms.py:1133:        visited[py, px] = True
+  algorithms.py:1134:        region_masks[i][py, px] = 255
+  algorithms.py:1135:        
+  algorithms.py:1136:    while q:
+  algorithms.py:1137:        cx, cy, idx = q.popleft()
+  algorithms.py:1138:        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+  algorithms.py:1139:            nx, ny = cx + dx, cy + dy
+  algorithms.py:1140:            if 0 <= nx < width and 0 <= ny < height:
+  algorithms.py:1141:                if not visited[ny, nx] and free_space[ny, nx] > 0:
+  algorithms.py:1142:                    visited[ny, nx] = True
+  algorithms.py:1143:                    region_masks[idx][ny, nx] = 255
+  algorithms.py:1144:                    q.append((nx, ny, idx))
+  algorithms.py:1145:                    
+  algorithms.py:1146:    # 2. Extract Polygons & Centroids for OpenCV Regions
+  algorithms.py:1147:    cv_regions = []
+  algorithms.py:1148:    for mask in region_masks:
+  algorithms.py:1149:        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+  algorithms.py:1150:        if not contours:
+  algorithms.py:1151:            continue
+  algorithms.py:1152:        c = max(contours, key=cv2.contourArea)
+  algorithms.py:1153:        area = cv2.contourArea(c)
+  algorithms.py:1154:        
+  algorithms.py:1155:        # Filter 1: Too small (like a window sill or noise)
+  algorithms.py:1156:        img_area = width * height
+  algorithms.py:1157:        min_room_area = max(1000, img_area * 0.002) # 0.2% of the image (e.g., 2000px for 1000x1000)
+  algorithms.py:1158:        if area < min_room_area: 
+  algorithms.py:1159:            continue
+  algorithms.py:1160:            
+  algorithms.py:1161:        # Filter 2: Touches the absolute border of the image (this is the outside world)
+  algorithms.py:1162:        rx, ry, rw, rh = cv2.boundingRect(c)
+  algorithms.py:1163:        if rx <= 2 or ry <= 2 or (rx + rw) >= width - 2 or (ry + rh) >= height - 2:
+  algorithms.py:1164:            continue
+  algorithms.py:1165:        
+  algorithms.py:1166:        # Simplify contour
+  algorithms.py:1167:        epsilon = 0.01 * cv2.arcLength(c, True)
+  algorithms.py:1168:        approx = cv2.approxPolyDP(c, epsilon, True)
+  algorithms.py:1169:        
+  algorithms.py:1170:        M = cv2.moments(c)
+  algorithms.py:1171:        if M["m00"] != 0:
+  algorithms.py:1172:            cx = int(M["m10"] / M["m00"])
+  algorithms.py:1173:            cy = int(M["m01"] / M["m00"])
+  algorithms.py:1174:        else:
+  algorithms.py:1175:            cx, cy = approx[0][0]
+  algorithms.py:1176:            
+  algorithms.py:1177:        cv_regions.append({
+  algorithms.py:1178:            "contour": approx,
+  algorithms.py:1179:            "cx": cx,
+  algorithms.py:1180:            "cy": cy,
+  algorithms.py:1181:            "mask": mask
+  algorithms.py:1182:        })
+  algorithms.py:1183:        
+  algorithms.py:1184:    if not cv_regions:
+  algorithms.py:1185:        return rooms_raw
+  algorithms.py:1186:
+  algorithms.py:1187:    # 3. Match Nemotron rooms to OpenCV regions
+  algorithms.py:1188:    # Parse Nemotron coordinates to pixels
+  algorithms.py:1189:    ai_rooms = []
+  algorithms.py:1190:    for r in rooms_raw:
+  algorithms.py:1191:        x3 = r.get("x", 0)
+  algorithms.py:1192:        z3 = r.get("z", 0)
+  algorithms.py:1193:        px = (x3 + 10) / 20 * width
+  algorithms.py:1194:        py = (z3 / aspect + 10) / 20 * height
+  algorithms.py:1195:        ai_rooms.append({"name": r.get("name", "Unknown"), "px": px, "py": py})
+  algorithms.py:1196:        
+  algorithms.py:1197:    # Greedy matching based on distance
+  algorithms.py:1198:    matches = [] # (ai_idx, cv_idx, dist)
+  algorithms.py:1199:    for i, ai in enumerate(ai_rooms):
+  algorithms.py:1200:        for j, cv in enumerate(cv_regions):
+  algorithms.py:1201:            d = np.hypot(ai["px"] - cv["cx"], ai["py"] - cv["cy"])
+  algorithms.py:1202:            matches.append((i, j, d))
+  algorithms.py:1203:            
+  algorithms.py:1204:    matches.sort(key=lambda x: x[2])
+  algorithms.py:1205:    used_ai = set()
+  algorithms.py:1206:    used_cv = set()
+  algorithms.py:1207:    final_assignments = []
+  algorithms.py:1208:    
+  algorithms.py:1209:    for ai_idx, cv_idx, d in matches:
+  algorithms.py:1210:        if ai_idx not in used_ai and cv_idx not in used_cv:
+  algorithms.py:1211:            final_assignments.append((ai_idx, cv_idx))
+  algorithms.py:1212:            used_ai.add(ai_idx)
+  algorithms.py:1213:            used_cv.add(cv_idx)
+  algorithms.py:1214:            
+  algorithms.py:1215:    # Unmatched AI rooms get assigned to closest unused CV region (if any) or nearest used region
+  algorithms.py:1216:    for ai_idx, ai in enumerate(ai_rooms):
+  algorithms.py:1217:        if ai_idx not in used_ai:
+  algorithms.py:1218:            if len(used_cv) < len(cv_regions):
+  algorithms.py:1219:                # Find closest unused
+  algorithms.py:1220:                best_cv, best_d = None, float('inf')
+  algorithms.py:1221:                for j, cv in enumerate(cv_regions):
+  algorithms.py:1222:                    if j not in used_cv:
+  algorithms.py:1223:                        d = np.hypot(ai["px"] - cv["cx"], ai["py"] - cv["cy"])
+  algorithms.py:1224:                        if d < best_d:
+  algorithms.py:1225:                            best_d = d
+  algorithms.py:1226:                            best_cv = j
+  algorithms.py:1227:                if best_cv is not None:
+  algorithms.py:1228:                    final_assignments.append((ai_idx, best_cv))
+  algorithms.py:1229:                    used_ai.add(ai_idx)
+  algorithms.py:1230:                    used_cv.add(best_cv)
+  algorithms.py:1231:            else:
+  algorithms.py:1232:                # All regions used, just assign to absolute closest to avoid dropping the room
+  algorithms.py:1233:                best_cv, best_d = None, float('inf')
+  algorithms.py:1234:                for j, cv in enumerate(cv_regions):
+  algorithms.py:1235:                    d = np.hypot(ai["px"] - cv["cx"], ai["py"] - cv["cy"])
+  algorithms.py:1236:                    if d < best_d:
+  algorithms.py:1237:                        best_d = d
+  algorithms.py:1238:                        best_cv = j
+  algorithms.py:1239:                if best_cv is not None:
+  algorithms.py:1240:                    final_assignments.append((ai_idx, best_cv))
+  algorithms.py:1241:                    
+  algorithms.py:1242:    # 4. Build final JSON output
+  algorithms.py:1243:    final_rooms = []
+  algorithms.py:1244:    for ai_idx, cv_idx in final_assignments:
+  algorithms.py:1245:        ai_room = ai_rooms[ai_idx]
+  algorithms.py:1246:        cv_room = cv_regions[cv_idx]
+  algorithms.py:1247:        
+  algorithms.py:1248:        # Build 3D polygon
+  algorithms.py:1249:        poly_3d = []
+  algorithms.py:1250:        for pt in cv_room["contour"]:
+  algorithms.py:1251:            px, py = pt[0]
+  algorithms.py:1252:            x3, z3 = to_3d(px, py)
+  algorithms.py:1253:            poly_3d.append({"x": x3, "z": z3})
+  algorithms.py:1254:            
+  algorithms.py:1255:        # Get bounding box of contour for x,z,w,h (used for label positioning)
+  algorithms.py:1256:        x, y, w, h = cv2.boundingRect(cv_room["contour"])
+  algorithms.py:1257:        cx3, cz3 = to_3d(x + w/2, y + h/2)
+  algorithms.py:1258:        x3_1, z3_1 = to_3d(x, y)
+  algorithms.py:1259:        x3_2, z3_2 = to_3d(x + w, y + h)
+  algorithms.py:1260:        w3 = abs(x3_2 - x3_1)
+  algorithms.py:1261:        h3 = abs(z3_2 - z3_1)
+  algorithms.py:1262:        
+  algorithms.py:1263:        final_rooms.append({
+  algorithms.py:1264:            "name": ai_room["name"],
+  algorithms.py:1265:            "x": cx3,
+  algorithms.py:1266:            "z": cz3,
+  algorithms.py:1267:            "w": w3,
+  algorithms.py:1268:            "h": h3,
+  algorithms.py:1269:            "polygon": poly_3d
+

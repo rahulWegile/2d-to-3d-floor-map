@@ -152,6 +152,13 @@ function Editor() {
             </label>
           </div>
           
+          <div className="tools-divider" style={{marginTop:'15px', marginBottom:'15px', height:'1px', background:'var(--border)'}}></div>
+          
+          <div className="lp-section-label">Room Categories</div>
+          <div id="room-category-filters" style={{display: 'flex', flexWrap:'wrap', gap: '6px', maxHeight: '150px', overflowY: 'auto', padding:'4px'}}>
+            {/* Populated dynamically by engine.js */}
+          </div>
+          
           <div id="tile-layer-filter-container" style={{display: 'none', marginTop: '15px', background: 'var(--bg-primary)', padding: '10px', borderRadius: '6px', border: '1px solid var(--border)'}}>
             <div style={{fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px'}}>Isolate Layer</div>
             <div style={{display: 'flex', flexDirection: 'column', gap: '6px'}} id="tile-layer-buttons">

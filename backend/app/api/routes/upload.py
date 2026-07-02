@@ -101,6 +101,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
             elif msg_type == "result":
                 results[file_idx] = {
                     "walls": payload["walls"], "rooms": payload["rooms"],
+                    "doors": payload.get("doors", []),
                     "imageUrl": f"/{extra}?t={time.time()}",
                     "width": payload["width"], "height": payload["height"],
                 }

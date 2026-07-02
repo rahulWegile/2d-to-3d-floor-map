@@ -3,8 +3,9 @@ import cv2
 import numpy as np
 import math
 from app.core.config import PIPELINE_VERSION
-from app.services.vision.algorithms import _expand_rooms_v4, _expand_rooms_v5, _expand_rooms_v6, _expand_rooms_v7
+from app.services.vision.algorithms import _expand_rooms_v4, _expand_rooms_v5, _expand_rooms_v6, _expand_rooms_v7, _expand_rooms_ai_clip, _expand_rooms_v8_polygons
 from app.services.vision.core import _extract_rooms
+from app.services.vision.walls import extract_wall_geometry, snap_rooms_to_regions
 from typing import Tuple, List, Dict, Any
 
 def process_image(img_bytes: bytes):
@@ -46,10 +47,12 @@ def process_image(img_bytes: bytes):
                 thicknesses.append(t)
     wall_thickness = int(np.median(thicknesses)) if thicknesses else max(5, int(img_min * 0.01))
 
-    # Erase text and noise before morphology
+    # Erase tiny text and noise before morphology
+    # We lowered this threshold from 0.05 to 0.01 to prevent deleting 
+    # short wall segments (walls interrupted by doors/windows).
     text_erased_thresh = np.zeros_like(thresh)
     for cnt in contours:
-        if cv2.arcLength(cnt, True) > img_min * 0.05:
+        if cv2.arcLength(cnt, True) > img_min * 0.01:
             cv2.drawContours(text_erased_thresh, [cnt], -1, 255, -1)
 
     # Opening: erase anything thinner than 50 % of wall thickness (furniture)
@@ -62,15 +65,30 @@ def process_image(img_bytes: bytes):
     close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_k, close_k))
     cleaned      = cv2.morphologyEx(structural_mask, cv2.MORPH_CLOSE, close_kernel)
 
+    yield (32, "Extracting precise wall geometry...")
+    # ── Precise wall/door/region geometry (walls.py) ─────────────────────────
+    geometry = None
+    try:
+        geometry = extract_wall_geometry(gray)
+        if geometry is not None:
+            print(f"Wall geometry: t={geometry['wall_thickness']:.1f} "
+                  f"doors={len(geometry['doors'])} regions={len(geometry['regions'])}")
+    except Exception as e:
+        print("Wall geometry error:", e)
+
+    # The precise stroke mask gives far cleaner centerlines than the legacy
+    # morphology mask when it is available.
+    skeleton_src = geometry["wall_mask"] if geometry is not None else cleaned
+
     yield (35, "Generating geometric skeleton...")
     # ── Fix 3: Skeletonize → single-pixel wall centerlines ───────────────────
     try:
         from cv2 import ximgproc as _ximgproc
-        skeleton = _ximgproc.thinning(cleaned, thinningType=_ximgproc.THINNING_ZHANGSUEN)
+        skeleton = _ximgproc.thinning(skeleton_src, thinningType=_ximgproc.THINNING_ZHANGSUEN)
     except (ImportError, AttributeError):
         # Fallback: iterative erosion skeleton (no extra dependency needed)
-        skeleton  = np.zeros_like(cleaned)
-        temp      = cleaned.copy()
+        skeleton  = np.zeros_like(skeleton_src)
+        temp      = skeleton_src.copy()
         cross     = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
         max_iters = max(30, wall_thickness * 2)   # cap prevents infinite loop
         for _ in range(max_iters):
@@ -203,16 +221,29 @@ def process_image(img_bytes: bytes):
     yield (60, "Running AI Vision extraction...")
     if PIPELINE_VERSION == "v7":
         rooms = None
-        
+        import base64
+
+        # Downscaled JPEG: the model only needs to read labels, and a 10x
+        # smaller payload cuts round-trip time. Coordinates are 0-1000
+        # normalized, so resolution doesn't matter.
+        ai_img = img
+        if max(height, width) > 1024:
+            s = 1024 / max(height, width)
+            ai_img = cv2.resize(img, (int(width * s), int(height * s)), interpolation=cv2.INTER_AREA)
+        ok_enc, jpeg_buf = cv2.imencode('.jpg', ai_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        ai_bytes = jpeg_buf.tobytes() if ok_enc else img_bytes
+        base64_image = base64.b64encode(ai_bytes).decode('utf-8')
+
         # 1. Try Nemotron First (Reasoning / Primary)
         try:
             from openai import OpenAI
-            import base64
             import json
             
             client = OpenAI(
               base_url="https://integrate.api.nvidia.com/v1",
-              api_key=os.environ.get("NVIDIA_API_KEY", "")
+              api_key=os.environ.get("NVIDIA_API_KEY", ""),
+              timeout=20.0,
+              max_retries=0,
             )
             
             prompt = """
@@ -241,39 +272,23 @@ EXAMPLE (structure only — do not copy these values):
 
 CRITICAL RULES — follow all of them exactly:
 
-1. STAY INSIDE THE OUTER WALLS:
-   - No bounding box may extend beyond the thick exterior walls of the building.
-   - Boxes must never reach into the white empty space outside the floor plan boundary.
+1. COVER THE COMPLETE ROOM (WALL-TO-WALL):
+   - Your bounding box MUST stretch to cover the entire empty, walkable interior space of the room.
+   - Do not make the boxes too small! They should go right up to the inner edges of the walls.
 
-2. ACCOMMODATE WALL THICKNESS (DO NOT TOUCH WALLS):
-   - Floor plan walls have physical thickness (thick lines/pixels). 
-   - Adjacent rooms must NOT share the exact same coordinate if there is a wall between them! For example, if a 10-pixel thick wall separates them, Room A might end at xmax=415, and Room B must start at xmin=425.
-   - The space occupied by the wall itself must be left EMPTY (uncovered by any bounding box).
+2. DO NOT BLEED OVER WALLS & DO NOT GO OUTSIDE:
+   - While you must cover the complete room, the box MUST stop flush against the inner edge of the wall.
+   - A box MUST NEVER pass or bleed through a thick structural wall into an adjacent room.
+   - Adjacent rooms must not overlap.
+   - MUST NEVER go outside of the outer exterior walls of the building into the blank background space.
 
-3. ZERO OVERLAPPING:
-   - No two boxes may share interior area.
-   - Overlapping boxes cause incorrect 3D rendering.
-
-4. EXTREME STRICTNESS ON WALLS (CRITICAL):
-   - A tile (room box) MUST NEVER pass or bleed through a structural wall.
-   - A tile MUST NEVER sit "on" the wall itself. The bounding box must NOT include the thick dark lines or pixels that make up the walls.
-   - The tile must represent ONLY the empty, walkable interior floor space. It must stop completely flush at the inner edge, leaving the physical wall completely untouched by the tile's footprint (like water poured into a glass).
-
-5. COVER ALL SPACES:
-   - Include hallways, corridors, bathrooms, closets, staircases, and utility rooms — each as its own labeled box.
-   - For open-plan areas with no printed label, use a descriptive name like "Open Area" or "Corridor".
-   - L-shaped or irregular rooms should be split into rectangular sub-boxes that together fill the shape without gaps or overlaps.
-
-SELF-CHECK before outputting:
-- Does every interior pixel belong to exactly one box?
-- Do all adjacent boxes share exact matching edge coordinates?
-- Are all xmax > xmin and ymax > ymin?
+3. COVER ALL SPACES:
+   - Include hallways, corridors, bathrooms, closets, staircases, and utility rooms.
+   - For L-shaped rooms, provide a bounding box that covers the primary largest rectangular area of that room.
 
 Return ONLY the raw JSON array. No markdown fences, no comments, no trailing commas, no extra keys.
             """
-            base64_image = base64.b64encode(img_bytes).decode('utf-8')
-            
-            yield (65, "AI Analyzing floorplan (Nemotron Reasoning)...")
+            yield (65, "AI Analyzing floorplan (Nemotron)...")
             completion = client.chat.completions.create(
               model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
               messages=[{
@@ -288,10 +303,12 @@ Return ONLY the raw JSON array. No markdown fences, no comments, no trailing com
                         },
                     ],
                 }],
-              temperature=0.6,
+              temperature=0.1,
               top_p=0.95,
-              max_tokens=4096,
-              extra_body={"chat_template_kwargs":{"enable_thinking":True},"reasoning_budget":2048},
+              max_tokens=2500,
+              # Thinking mode makes vision calls take 90s+ (frequent timeouts) and
+              # the wall geometry owns coordinates now — names don't need reasoning.
+              extra_body={"chat_template_kwargs":{"enable_thinking":False}},
               stream=False
             )
             
@@ -311,25 +328,43 @@ Return ONLY the raw JSON array. No markdown fences, no comments, no trailing com
                 
             if isinstance(rooms_data, list):
                 nemotron_rooms = []
+                seen_names = set()
                 for r in rooms_data:
-                    xmin = r.get("xmin", 0)
-                    xmax = r.get("xmax", 0)
-                    ymin = r.get("ymin", 0)
-                    ymax = r.get("ymax", 0)
+                    if not isinstance(r, dict):
+                        continue
+                    try:
+                        xmin = float(r.get("xmin", 0))
+                        xmax = float(r.get("xmax", 0))
+                        ymin = float(r.get("ymin", 0))
+                        ymax = float(r.get("ymax", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    # Clamp to the 0-1000 grid the prompt defines
+                    xmin = max(0.0, min(xmin, 1000.0))
+                    xmax = max(0.0, min(xmax, 1000.0))
+                    ymin = max(0.0, min(ymin, 1000.0))
+                    ymax = max(0.0, min(ymax, 1000.0))
+                    # Degenerate slivers (<0.5% of the grid) are hallucinations
+                    if xmax - xmin < 5 or ymax - ymin < 5:
+                        continue
+                    # A labeled room returned twice is a hallucinated duplicate
+                    name = str(r.get("name", "Room")).strip() or "Room"
+                    name_key = name.lower()
+                    if name_key != "room" and name_key in seen_names:
+                        continue
+                    seen_names.add(name_key)
                     
                     xmin_3d = (xmin / 1000.0) * 20 - 10
                     xmax_3d = (xmax / 1000.0) * 20 - 10
                     ymin_3d = ((ymin / 1000.0) * 20 - 10) * aspect
                     ymax_3d = ((ymax / 1000.0) * 20 - 10) * aspect
                     
-                    if xmax_3d <= xmin_3d: xmax_3d = xmin_3d + 0.1
-                    if ymax_3d <= ymin_3d: ymax_3d = ymin_3d + 0.1
                     
                     orig_x = (xmin_3d + xmax_3d) / 2
                     orig_z = (ymin_3d + ymax_3d) / 2
                     
                     nemotron_rooms.append({
-                        "name": r.get("name", "Unknown"),
+                        "name": name,
                         "x": float(orig_x),
                         "z": float(orig_z),
                         "w": float(abs(xmax_3d - xmin_3d)),
@@ -338,32 +373,80 @@ Return ONLY the raw JSON array. No markdown fences, no comments, no trailing com
                             {"x": float(xmin_3d), "z": float(ymin_3d)},
                             {"x": float(xmax_3d), "z": float(ymin_3d)},
                             {"x": float(xmax_3d), "z": float(ymax_3d)},
-                            {"x": float(xmin_3d), "z": float(ymax_3d)},
+                            {"x": float(xmin_3d), "z": float(ymax_3d)}
                         ]
                     })
                 if nemotron_rooms:
-                    rooms = nemotron_rooms
-                    print("100% AI Mode: Bypassed OpenCV geometry using Nemotron!")
+                    yield (80, "Merging AI rooms with OCR fallbacks...")
+                    ocr_fallback = get_rooms_raw()
+                    merged_rooms = nemotron_rooms.copy()
+                    for ocr_r in ocr_fallback:
+                        # Add OCR room only if it's far from any AI room (meaning AI missed it)
+                        is_new = True
+                        for ai_r in nemotron_rooms:
+                            if math.hypot(ocr_r["x"] - ai_r["x"], ocr_r["z"] - ai_r["z"]) < 3.0:
+                                is_new = False
+                                break
+                        if is_new:
+                            ocr_r_copy = ocr_r.copy()
+                            ocr_r_copy["w"] = 2.0  # Default small box for expansion seed
+                            ocr_r_copy["h"] = 2.0
+                            merged_rooms.append(ocr_r_copy)
+                            
+                    yield (85, "Snapping rooms to exact wall geometry...")
+                    if geometry is not None and len(geometry["regions"]) >= 2:
+                        rooms = snap_rooms_to_regions(merged_rooms, geometry, height, width)
+                    if not rooms:
+                        rooms = _expand_rooms_v8_polygons(merged_rooms, cleaned, wall_thickness, height, width)
+                    print(f"Hybrid Mode: {len(nemotron_rooms)} AI + {len(merged_rooms)-len(nemotron_rooms)} OCR -> {len(rooms)} region-locked rooms.")
         except Exception as e:
             print("Nemotron API error:", e)
 
-        # 2. Fallback to Gemini (Fast)
         if not rooms:
             try:
                 yield (70, "Falling back to Gemini...")
                 from app.services.vision.gemini import _extract_rooms_gemini
-                rooms_ai = _extract_rooms_gemini(img_bytes, height, width)
+                rooms_ai = _extract_rooms_gemini(ai_bytes, height, width)
                 if rooms_ai and len(rooms_ai) > 0:
-                    rooms = rooms_ai
-                    print("100% AI Mode: Bypassed OpenCV geometry using Gemini!")
+                    yield (80, "Merging Gemini rooms with OCR fallbacks...")
+                    ocr_fallback = get_rooms_raw()
+                    merged_rooms = rooms_ai.copy()
+                    for ocr_r in ocr_fallback:
+                        is_new = True
+                        for ai_r in rooms_ai:
+                            if math.hypot(ocr_r["x"] - ai_r["x"], ocr_r["z"] - ai_r["z"]) < 3.0:
+                                is_new = False
+                                break
+                        if is_new:
+                            ocr_r_copy = ocr_r.copy()
+                            ocr_r_copy["w"] = 2.0
+                            ocr_r_copy["h"] = 2.0
+                            merged_rooms.append(ocr_r_copy)
+                            
+                    yield (85, "Snapping rooms to exact wall geometry...")
+                    if geometry is not None and len(geometry["regions"]) >= 2:
+                        rooms = snap_rooms_to_regions(merged_rooms, geometry, height, width)
+                    if not rooms:
+                        clipped = _expand_rooms_ai_clip(merged_rooms, cleaned, wall_thickness, height, width)
+                        rooms = clipped if clipped else merged_rooms
             except Exception as e:
                 print("Gemini integration error:", e)
 
-
         if not rooms:
-            yield (75, "Falling back to OpenCV OCR + Geometry...")
+            yield (75, "Falling back to OCR + Rectangular Geometry...")
             rooms_raw = get_rooms_raw()
-            rooms = _expand_rooms_v7(rooms_raw, cleaned, wall_thickness, height, width)
+            merged_rooms = []
+            for r in rooms_raw:
+                rc = r.copy()
+                rc["w"] = 2.0
+                rc["h"] = 2.0
+                merged_rooms.append(rc)
+            if geometry is not None and len(geometry["regions"]) >= 2:
+                rooms = snap_rooms_to_regions(merged_rooms, geometry, height, width)
+            if not rooms:
+                rooms = _expand_rooms_ai_clip(merged_rooms, cleaned, wall_thickness, height, width)
+            if not rooms:
+                rooms = merged_rooms
     elif PIPELINE_VERSION == "v6":
         rooms = _expand_rooms_v6(get_rooms_raw(), cleaned, wall_thickness, height, width)
     elif PIPELINE_VERSION == "v5":
@@ -375,6 +458,14 @@ Return ONLY the raw JSON array. No markdown fences, no comments, no trailing com
     else:
         rooms = _expand_rooms_v2(get_rooms_raw(), cleaned, wall_thickness, height, width)
 
-    # Final yield is the result dictionary
-    yield {"walls": walls, "rooms": rooms, "width": width, "height": height}
+    # Detected door/window openings, in the same 3D space as walls
+    doors = []
+    if geometry is not None:
+        for (dx1, dy1, dx2, dy2) in geometry["doors"]:
+            doors.append({"points": [
+                {"x": float((dx1 / width) * 20 - 10), "z": float(((dy1 / height) * 20 - 10) * aspect)},
+                {"x": float((dx2 / width) * 20 - 10), "z": float(((dy2 / height) * 20 - 10) * aspect)},
+            ]})
 
+    # Final yield is the result dictionary
+    yield {"walls": walls, "rooms": rooms, "doors": doors, "width": width, "height": height}

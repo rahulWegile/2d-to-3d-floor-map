@@ -184,7 +184,77 @@ export function isFloorLabelsVisible(floorIndex) {
     return !hiddenLabelFloors.has(floorIndex);
 }
 
-export function getFloorCount() {
+window.activeRoomFilterNames = new Set();
+
+function updateRoomCategoryFilters() {
+    const container = document.getElementById('room-category-filters');
+    if (!container) return;
+    
+    const isStacked = document.getElementById('stack-floors-mode')?.checked;
+    // Get unique room names
+    const names = new Set();
+    floorsData.forEach((f, idx) => {
+        if (!isStacked && idx !== activeFloorIndex) return;
+        f.roomLabels.forEach(l => {
+            const n = l.name ? l.name.trim() : '';
+            if (n && !/^Room \d+$/i.test(n)) {
+                names.add(n);
+            }
+        });
+    });
+    
+    container.innerHTML = '';
+    if (names.size === 0) {
+        container.innerHTML = '<div style="font-size:11px; color:#9CA3AF; padding:8px 4px; font-style:italic;">No custom rooms</div>';
+        return;
+    }
+    
+    Array.from(names).sort().forEach(name => {
+        const btn = document.createElement('button');
+        const isActive = window.activeRoomFilterNames.has(name);
+        btn.innerText = name;
+        btn.style.cssText = `
+            font-size: 10px;
+            padding: 5px 10px;
+            border-radius: 12px;
+            cursor: pointer;
+            border: 1px solid ${isActive ? '#bd9476' : '#E2C4A2'};
+            background: ${isActive ? '#bd9476' : '#FDF4EC'};
+            color: ${isActive ? '#fff' : '#A87A5B'};
+            font-weight: 500;
+            transition: all 0.2s ease;
+            box-shadow: ${isActive ? '0 2px 6px rgba(189,148,118,0.3)' : 'none'};
+        `;
+        
+        btn.onmouseover = () => {
+            if (!isActive) {
+                btn.style.background = '#bd9476';
+                btn.style.borderColor = '#bd9476';
+                btn.style.color = '#fff';
+            }
+        };
+        btn.onmouseout = () => {
+            if (!isActive) {
+                btn.style.background = '#FDF4EC';
+                btn.style.borderColor = '#E2C4A2';
+                btn.style.color = '#A87A5B';
+            }
+        };
+
+        btn.onclick = () => {
+            if (window.activeRoomFilterNames.has(name)) {
+                window.activeRoomFilterNames.delete(name);
+            } else {
+                window.activeRoomFilterNames.add(name);
+            }
+            updateRoomCategoryFilters();
+            updateFloorVisibility();
+        };
+        container.appendChild(btn);
+    });
+}
+
+function processFloor(floor, yOffset, isLast) {
     return floorsData.length;
 }
 
@@ -844,7 +914,13 @@ function updateFloorVisibility() {
             const yStackOffset = 0.05 + ((l.layerIndex || 1) - 1) * 0.8;
             l.mesh.position.y = targetY + yStackOffset;
             if (l.center) l.center.y = targetY + yStackOffset;
-            l.mesh.visible = isVisible;
+            if (window.activeRoomFilterNames && window.activeRoomFilterNames.size > 0) {
+                const lName = l.name ? l.name.trim() : '';
+                l.mesh.visible = window.activeRoomFilterNames.has(lName);
+                l.element.style.display = l.mesh.visible ? 'flex' : 'none';
+            } else {
+                l.mesh.visible = isVisible;
+            }
         });
 
         // Floor Mesh:
@@ -1016,6 +1092,7 @@ function buildBuilding(floorsArr) {
     });
 
 
+    updateRoomCategoryFilters();
     updateFloorVisibility();
 }
 
@@ -1046,6 +1123,11 @@ export async function saveCurrentProject() {
                     x: (base.center ? base.center.x : 0) + base.mesh.position.x,
                     z: (base.center ? base.center.z : 0) + base.mesh.position.z,
                     name: g.layers.find(ly => ly.layerIndex === 1)?.name || base.name || base.element.innerText || '',
+                    layerNames: [
+                        g.layers.find(ly => ly.layerIndex === 1)?.name || '',
+                        g.layers.find(ly => ly.layerIndex === 2)?.name || '',
+                        g.layers.find(ly => ly.layerIndex === 3)?.name || ''
+                    ],
                     groupId: base.groupId,
                     layers: g.layers
                 };
@@ -1581,7 +1663,18 @@ function onClick(event) {
     const intersects = getIntersects(event, targets);
 
     if (intersects.length > 0) {
-        const hit = intersects[0];
+        let hit = intersects[0];
+        
+        // Piercing raycaster for Stacked View
+        const isStacked = document.getElementById('stack-floors-mode')?.checked;
+        if (isStacked) {
+            // Find the first hit that is a room tile (label mesh)
+            const tileHit = intersects.find(i => floorsData.some(f => f.roomLabels.some(l => l.mesh === i.object)));
+            if (tileHit) {
+                hit = tileHit;
+            }
+        }
+        
         deselectAll();
 
         let hitFloor = null;
@@ -1900,7 +1993,10 @@ function updateLabels() {
                 else if (lIdx === 2) defaultVisible = showL2;
                 else if (lIdx === 3) defaultVisible = showL3;
                 
-                if (window.isolatedRoomGroupId && label.groupId === window.isolatedRoomGroupId) {
+                if (window.activeRoomFilterNames && window.activeRoomFilterNames.size > 0) {
+                    const lName = label.name ? label.name.trim() : '';
+                    label.mesh.visible = window.activeRoomFilterNames.has(lName);
+                } else if (window.isolatedRoomGroupId && label.groupId === window.isolatedRoomGroupId) {
                     if (window.isolatedLayerIndex !== null) {
                         label.mesh.visible = (lIdx === window.isolatedLayerIndex);
                     } else {
@@ -1911,7 +2007,8 @@ function updateLabels() {
                 }
             }
 
-            if (!showLabels || !f.isVisible || !label.mesh.visible || hiddenLabelFloors.has(idx) || !label.element || !label.name.trim()) {
+            const lNameTrimmed = label.name ? label.name.trim() : '';
+            if (!showLabels || !f.isVisible || !label.mesh.visible || hiddenLabelFloors.has(idx) || !label.element || !lNameTrimmed) {
                 if (label.element) label.element.style.display = 'none';
                 return;
             }

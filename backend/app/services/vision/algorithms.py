@@ -889,21 +889,24 @@ def _expand_rooms_labeled(rooms_raw, wall_mask, wall_thickness, height, width):
             
         bounded = room_masks[idx].astype(np.uint8) * 255
         
-        # Erode strictly to avoid touching walls (creates spacing)
-        tile_margin = max(4, int(wall_thickness * 0.4))
-        margin_kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (tile_margin * 2 + 1, tile_margin * 2 + 1))
-        safe = cv2.erode(bounded, margin_kernel_small)
-        
-        rect = _lir_cropped(safe)
-        if rect is None:
-            # Fallback with smaller margin if room is too small
-            safe2 = cv2.erode(bounded, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
-            rect  = _lir_cropped(safe2)
-            
-        if rect is None:
+        if cv2.countNonZero(bounded) == 0:
             continue
             
+        # Find the absolute center/deepest point of the room to start expansion
+        dist_room = cv2.distanceTransform(bounded, cv2.DIST_L2, 5)
+        _, _, _, max_loc = cv2.minMaxLoc(dist_room)
+        cx, cy = max_loc
+        
+        # Expand 4-ways outward from the center point until hitting walls
+        rect = expand_from_point_in_mask(cx, cy, bounded, height, width)
+        if rect is None:
+            continue
+        
         x1, y1, x2, y2 = rect
+        
+        # Apply a small inward margin so it doesn't overlap perfectly with adjacent rooms
+        margin = max(1, int(wall_thickness * 0.15))
+        x1 += margin; y1 += margin; x2 -= margin; y2 -= margin
         
         # Ensure we have a valid rectangle size
         if x2 <= x1 or y2 <= y1 or (x2 - x1) * (y2 - y1) < min_area:
@@ -914,8 +917,8 @@ def _expand_rooms_labeled(rooms_raw, wall_mask, wall_thickness, height, width):
         
         final_rooms.append({
             "name":    room['name'],
-            "x":       room['x'],
-            "z":       room['z'],
+            "x":       (rx1 + rx2) / 2,
+            "z":       (rz1 + rz2) / 2,
             "w":       abs(rx2 - rx1),
             "h":       abs(rz2 - rz1),
             "polygon": [
@@ -930,3 +933,399 @@ def _expand_rooms_labeled(rooms_raw, wall_mask, wall_thickness, height, width):
     return final_rooms
 
 
+def _expand_rooms_ai_clip(nemotron_rooms, wall_mask, wall_thickness, height, width):
+    """
+    Takes Nemotron's raw hallucinated boxes and mathematically clips them so they:
+    1. Never overlap each other.
+    2. Never pass through structural walls.
+    """
+    import numpy as np
+    import cv2
+    
+    aspect = height / width
+    def to_3d(px, py):
+        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+
+    pixel_boxes = []
+    for room in nemotron_rooms:
+        x_3d = room["x"]
+        z_3d = room["z"]
+        w_3d = room["w"]
+        h_3d = room["h"]
+        
+        cx = (x_3d + 10) / 20 * width
+        cy = (z_3d / aspect + 10) / 20 * height
+        w_px = (w_3d / 20) * width
+        h_px = (h_3d / (20 * aspect)) * height
+        
+        x1 = max(0, int(cx - w_px / 2))
+        y1 = max(0, int(cy - h_px / 2))
+        x2 = min(width, int(cx + w_px / 2))
+        y2 = min(height, int(cy + h_px / 2))
+        pixel_boxes.append({
+            "name": room["name"],
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2
+        })
+
+    pixel_boxes.sort(key=lambda b: (b["x2"]-b["x1"])*(b["y2"]-b["y1"]))
+
+    # Treat everything outside the building footprint as wall so boxes that
+    # bleed into the blank background get pulled back inside the exterior walls.
+    fp_k = max(50, wall_thickness * 5)
+    fp_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (fp_k, fp_k))
+    closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, fp_kernel)
+    fp_contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    solid_wall_mask = wall_mask
+    bb_x1, bb_y1, bb_x2, bb_y2 = 0, 0, width, height
+    if fp_contours:
+        largest = max(fp_contours, key=cv2.contourArea)
+        # Only trust the footprint if it covers a plausible share of the image
+        if cv2.contourArea(largest) > 0.2 * height * width:
+            building_mask = np.zeros_like(wall_mask)
+            cv2.drawContours(building_mask, [largest], -1, 255, -1)
+            solid_wall_mask = wall_mask.copy()
+            solid_wall_mask[building_mask == 0] = 255
+            bx, by, bw, bh = cv2.boundingRect(largest)
+            bb_x1, bb_y1, bb_x2, bb_y2 = bx, by, bx + bw, by + bh
+    
+    claimed_mask = np.zeros((height, width), dtype=np.uint8)
+    final_rooms = []
+    
+    for b in pixel_boxes:
+        x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
+        if x2 <= x1 or y2 <= y1: continue
+        
+        # Limit the search for the starting point (peak) to the AI's box.
+        # This guarantees we start expanding from inside the room the AI identified.
+        local_free_space = np.zeros((height, width), dtype=np.uint8)
+        local_free_space[y1:y2, x1:x2] = 255
+        local_free_space[solid_wall_mask > 0] = 0
+        local_free_space[claimed_mask > 0] = 0
+
+        margin = max(2, int(wall_thickness * 0.2))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (margin*2+1, margin*2+1))
+        local_safe_space = cv2.erode(local_free_space, kernel)
+        
+        # But once we find that starting point, we must allow the expansion to
+        # fill the ENTIRE room until it physically hits a wall, even if the AI
+        # drew a tiny box just around the room's text label.
+        full_free_space = np.zeros((height, width), dtype=np.uint8)
+        full_free_space.fill(255)
+        full_free_space[solid_wall_mask > 0] = 0
+        full_free_space[claimed_mask > 0] = 0
+        
+        def _get_rect(m):
+            if cv2.countNonZero(m) == 0: return None
+            dt = cv2.distanceTransform(m, cv2.DIST_L2, 5)
+            _, _, _, peak = cv2.minMaxLoc(dt)
+            # Expand inside the FULL room, not just the AI's small box!
+            return expand_from_point_in_mask(peak[0], peak[1], full_free_space, height, width)
+
+        rect = _get_rect(local_safe_space)
+        if rect is None:
+            rect = _get_rect(local_free_space)
+        if rect is None and solid_wall_mask is not wall_mask:
+            # Room sits outside the main envelope (porch, balcony): retry
+            local_free_space = np.zeros((height, width), dtype=np.uint8)
+            local_free_space[y1:y2, x1:x2] = 255
+            local_free_space[wall_mask > 0] = 0
+            local_free_space[claimed_mask > 0] = 0
+            
+            full_free_space = np.zeros((height, width), dtype=np.uint8)
+            full_free_space.fill(255)
+            full_free_space[wall_mask > 0] = 0
+            full_free_space[claimed_mask > 0] = 0
+            
+            local_safe_space = cv2.erode(local_free_space, kernel)
+            rect = _get_rect(local_safe_space)
+            if rect is None:
+                rect = _get_rect(local_free_space)
+
+        # We removed the 'loose' fallback that distrusted the wall mask.
+        # If the AI draws a massive box that covers multiple rooms or exterior walls, 
+        # we MUST still strictly snap to the interior structural walls.
+
+        if rect is not None:
+            rx1, ry1, rx2, ry2 = rect
+            cv2.rectangle(claimed_mask, (rx1, ry1), (rx2, ry2), 255, -1)
+            
+            cx3, cz3 = to_3d((rx1+rx2)/2, (ry1+ry2)/2)
+            px1, pz1 = to_3d(rx1, ry1)
+            px2, pz2 = to_3d(rx2, ry2)
+            
+            final_rooms.append({
+                "name": b["name"],
+                "x": cx3,
+                "z": cz3,
+                "w": abs(px2 - px1),
+                "h": abs(pz2 - pz1),
+                "polygon": [{"x": px1, "z": pz1}, {"x": px2, "z": pz1}, {"x": px2, "z": pz2}, {"x": px1, "z": pz2}]
+            })
+            
+    return final_rooms
+import numpy as np
+import cv2
+
+def _expand_rooms_v8_polygons(rooms_raw, wall_mask, wall_thickness, height, width, fallback_raw=None):
+    """
+    V8 Polygon Algorithm:
+    1. OpenCV extracts perfect non-overlapping region masks (via distance transform & BFS).
+    2. We extract the exact polygonal contours of these regions.
+    3. We greedy-match Nemotron's hallucinated coordinates to the nearest valid OpenCV region.
+    4. We return the exact room polygon to the frontend for perfect 3D rendering without overlaps or wall-crossing.
+    """
+    aspect = height / width
+    def to_3d(px, py):
+        return float((px / width) * 20 - 10), float(((py / height) * 20 - 10) * aspect)
+
+    # 1. Solid building footprint to prevent outside detections
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(50, int(wall_thickness * 5)), max(50, int(wall_thickness * 5))))
+    closed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, close_kernel)
+    contours, _ = cv2.findContours(closed_walls, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    building_mask = np.zeros_like(wall_mask)
+    if contours:
+        largest_contour = max(contours, key=cv2.contourArea)
+        cv2.drawContours(building_mask, [largest_contour], -1, 255, -1)
+    else:
+        building_mask.fill(255)
+        
+    wall_mask = wall_mask.copy()
+    wall_mask[building_mask == 0] = 255
+
+    # 2. OpenCV Region Extraction
+    free_space = (wall_mask == 0).astype(np.uint8) * 255
+    
+    # Smooth over furniture to find peaks correctly
+    annot_k = max(3, min(int(round(wall_thickness * 0.35)), 9))
+    if annot_k % 2 == 0: annot_k += 1
+    small_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    large_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (annot_k, annot_k))
+    smoothed_free = cv2.morphologyEx(free_space, cv2.MORPH_CLOSE, small_kernel)
+    smoothed_free = cv2.morphologyEx(smoothed_free, cv2.MORPH_CLOSE, large_kernel)
+    smoothed_free = cv2.morphologyEx(smoothed_free, cv2.MORPH_OPEN, small_kernel)
+    
+    dist = cv2.distanceTransform(smoothed_free, cv2.DIST_L2, 5)
+    
+    # Erode dist to find distinct room centers
+    local_max = cv2.dilate(dist, np.ones((5, 5), np.uint8))
+    peaks = (dist == local_max) & (dist > max(5, wall_thickness * 1.5))
+    ys, xs = np.where(peaks)
+    
+    # Consolidate nearby peaks
+    pts = list(zip(xs, ys))
+    merged_peaks = []
+    min_dist = max(20, wall_thickness * 3)
+    for p in pts:
+        if not any(np.hypot(p[0]-m[0], p[1]-m[1]) < min_dist for m in merged_peaks):
+            merged_peaks.append(p)
+            
+    if not merged_peaks:
+        return rooms_raw # Fallback if no rooms found
+        
+    # BFS to grow regions
+    region_masks = [np.zeros((height, width), dtype=np.uint8) for _ in merged_peaks]
+    from collections import deque
+    q = deque()
+    visited = np.zeros((height, width), dtype=bool)
+    
+    for i, (px, py) in enumerate(merged_peaks):
+        q.append((px, py, i))
+        visited[py, px] = True
+        region_masks[i][py, px] = 255
+        
+    while q:
+        cx, cy, idx = q.popleft()
+        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < width and 0 <= ny < height:
+                if not visited[ny, nx] and free_space[ny, nx] > 0:
+                    visited[ny, nx] = True
+                    region_masks[idx][ny, nx] = 255
+                    q.append((nx, ny, idx))
+                    
+    # 2. Extract Polygons & Centroids for OpenCV Regions
+    cv_regions = []
+    for mask in region_masks:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        c = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(c)
+        
+        # Filter 1: Too small (like a window sill or noise)
+        img_area = width * height
+        min_room_area = max(1000, img_area * 0.002) # 0.2% of the image (e.g., 2000px for 1000x1000)
+        if area < min_room_area: 
+            continue
+            
+        # Filter 2: Touches the absolute border of the image (this is the outside world)
+        rx, ry, rw, rh = cv2.boundingRect(c)
+        if rx <= 2 or ry <= 2 or (rx + rw) >= width - 2 or (ry + rh) >= height - 2:
+            continue
+        
+        # Simplify contour
+        epsilon = 0.01 * cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, epsilon, True)
+        
+        M = cv2.moments(c)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        else:
+            cx, cy = approx[0][0]
+            
+        cv_regions.append({
+            "contour": approx,
+            "cx": cx,
+            "cy": cy,
+            "mask": mask
+        })
+        
+    if not cv_regions:
+        return rooms_raw
+
+    # 3. Match Nemotron rooms to OpenCV regions
+    # Parse Nemotron coordinates to pixels
+    ai_rooms = []
+    for r in rooms_raw:
+        x3 = r.get("x", 0)
+        z3 = r.get("z", 0)
+        px = (x3 + 10) / 20 * width
+        py = (z3 / aspect + 10) / 20 * height
+        ai_rooms.append({"name": r.get("name", "Unknown"), "px": px, "py": py})
+        
+    # Greedy matching based on distance
+    matches = [] # (ai_idx, cv_idx, dist)
+    for i, ai in enumerate(ai_rooms):
+        for j, cv in enumerate(cv_regions):
+            d = np.hypot(ai["px"] - cv["cx"], ai["py"] - cv["cy"])
+            matches.append((i, j, d))
+            
+    matches.sort(key=lambda x: x[2])
+    used_ai = set()
+    used_cv = set()
+    final_assignments = []
+    
+    for ai_idx, cv_idx, d in matches:
+        if ai_idx not in used_ai and cv_idx not in used_cv:
+            final_assignments.append((ai_idx, cv_idx))
+            used_ai.add(ai_idx)
+            used_cv.add(cv_idx)
+            
+    # Unmatched AI rooms get assigned to closest unused CV region (if any) or nearest used region
+    for ai_idx, ai in enumerate(ai_rooms):
+        if ai_idx not in used_ai:
+            if len(used_cv) < len(cv_regions):
+                # Find closest unused
+                best_cv, best_d = None, float('inf')
+                for j, cv in enumerate(cv_regions):
+                    if j not in used_cv:
+                        d = np.hypot(ai["px"] - cv["cx"], ai["py"] - cv["cy"])
+                        if d < best_d:
+                            best_d = d
+                            best_cv = j
+                if best_cv is not None:
+                    final_assignments.append((ai_idx, best_cv))
+                    used_ai.add(ai_idx)
+                    used_cv.add(best_cv)
+            else:
+                # All regions used, just assign to absolute closest to avoid dropping the room
+                best_cv, best_d = None, float('inf')
+                for j, cv in enumerate(cv_regions):
+                    d = np.hypot(ai["px"] - cv["cx"], ai["py"] - cv["cy"])
+                    if d < best_d:
+                        best_d = d
+                        best_cv = j
+                if best_cv is not None:
+                    final_assignments.append((ai_idx, best_cv))
+                    
+    # 4. Build final JSON output
+    final_rooms = []
+    
+    # Helper to build room object
+    def build_room_obj(name, cv_room):
+        poly_3d = []
+        for pt in cv_room["contour"]:
+            px, py = pt[0]
+            x3, z3 = to_3d(px, py)
+            poly_3d.append({"x": x3, "z": z3})
+            
+        x, y, w, h = cv2.boundingRect(cv_room["contour"])
+        cx3, cz3 = to_3d(x + w/2, y + h/2)
+        x3_1, z3_1 = to_3d(x, y)
+        x3_2, z3_2 = to_3d(x + w, y + h)
+        w3 = abs(x3_2 - x3_1)
+        h3 = abs(z3_2 - z3_1)
+        
+        return {
+            "name": name,
+            "x": cx3,
+            "z": cz3,
+            "w": w3,
+            "h": h3,
+            "polygon": poly_3d
+        }
+
+    for ai_idx, cv_idx in final_assignments:
+        ai_room = ai_rooms[ai_idx]
+        cv_room = cv_regions[cv_idx]
+        final_rooms.append(build_room_obj(ai_room["name"], cv_room))
+        
+    # Add any leftover CV regions as generic rooms
+    unmatched_count = 1
+    for j, cv_room in enumerate(cv_regions):
+        if j not in used_cv:
+            final_rooms.append(build_room_obj(f"Room {unmatched_count}", cv_room))
+            unmatched_count += 1
+    # 5. Handle unmatched CV regions (rooms the AI missed) using OCR fallback
+    if fallback_raw is None:
+        fallback_raw = []
+        
+    ocr_rooms = []
+    for r in fallback_raw:
+        x3 = r.get("x", 0)
+        z3 = r.get("z", 0)
+        px = (x3 + 10) / 20 * width
+        py = (z3 / aspect + 10) / 20 * height
+        ocr_rooms.append({"name": r.get("name", "Room"), "px": px, "py": py})
+        
+    for j, cv in enumerate(cv_regions):
+        if j not in used_cv:
+            # Find closest OCR room
+            best_ocr_name = "Room"
+            best_d = float('inf')
+            for ocr in ocr_rooms:
+                d = np.hypot(ocr["px"] - cv["cx"], ocr["py"] - cv["cy"])
+                if d < best_d and d < min(width, height) * 0.1: # Must be somewhat close
+                    best_d = d
+                    best_ocr_name = ocr["name"]
+            
+            # Add this unmatched region to the output
+            x, y, w, h = cv2.boundingRect(cv["contour"])
+            cx3, cz3 = to_3d(x + w/2, y + h/2)
+            x3_1, z3_1 = to_3d(x, y)
+            x3_2, z3_2 = to_3d(x + w, y + h)
+            
+            poly_3d = []
+            for pt in cv["contour"]:
+                poly_3d.append({"x": to_3d(pt[0][0], pt[0][1])[0], "z": to_3d(pt[0][0], pt[0][1])[1]})
+                
+            final_rooms.append({
+                "name": best_ocr_name,
+                "x": cx3,
+                "z": cz3,
+                "w": abs(x3_2 - x3_1),
+                "h": abs(z3_2 - z3_1),
+                "polygon": poly_3d
+            })
+            
+    return final_rooms
+
+# Test mock
+if __name__ == "__main__":
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    cv2.rectangle(mask, (10,10), (40,40), 255, 3)
+    cv2.rectangle(mask, (60,10), (90,40), 255, 3)
+    rooms_raw = [{"name": "Room A", "x": -5, "z": -5}, {"name": "Room B", "x": 5, "z": -5}]
+    res = _expand_rooms_v8_polygons(rooms_raw, mask, 3, 100, 100)
+    print("Test passed! Found", len(res), "rooms.")

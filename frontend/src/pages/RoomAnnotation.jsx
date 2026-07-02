@@ -670,12 +670,25 @@ export default function RoomAnnotation() {
     });
     const userId = localStorage.getItem('user_id');
     const token  = localStorage.getItem('token');
-    await fetch(`${API_BASE}/projects/save`, {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json', Authorization:'Bearer '+token },
-      body: JSON.stringify({ user_id:userId, project_id:projectId, name:projName, rawBackendData:updatedFloors }),
-    });
-    navigate(`/editor?project_id=${projectId}`);
+    
+    try {
+      const res = await fetch(`${API_BASE}/projects/save`, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', Authorization:'Bearer '+token },
+        body: JSON.stringify({ user_id:userId, project_id:projectId, name:projName, rawBackendData:updatedFloors }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        alert('Save failed: ' + txt);
+        setSaving(false);
+        return;
+      }
+      navigate(`/editor?project_id=${projectId}`);
+    } catch(e) {
+      console.error(e);
+      alert('Save error: ' + e.message);
+      setSaving(false);
+    }
   };
 
   const handleBack = async () => {
@@ -855,22 +868,59 @@ export default function RoomAnnotation() {
                   </span>
                 </div>
                 
-                {idx === selectedIdx && (
-                  <div style={{ padding: '12px 14px', background: '#FDF4EC', borderRadius: '0 0 8px 8px', border: '1px solid #E2C4A2', borderTop: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    <div>
-                      <div style={{ fontSize: 10, color: '#A87A5B', fontWeight: 700, marginBottom: 4, letterSpacing: '0.05em' }}>LAYER 1 (BASE)</div>
-                      <input value={room.layerNames?.[0] ?? room.name ?? ''} onChange={(e) => setLayerName(idx, 0, e.target.value)} placeholder="e.g. Bedroom" style={{ width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid #E2C4A2', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 10, color: '#A87A5B', fontWeight: 700, marginBottom: 4, letterSpacing: '0.05em' }}>LAYER 2 (MIDDLE)</div>
-                      <input value={room.layerNames?.[1] ?? ''} onChange={(e) => setLayerName(idx, 1, e.target.value)} placeholder="e.g. Balcony" style={{ width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid #E2C4A2', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 10, color: '#A87A5B', fontWeight: 700, marginBottom: 4, letterSpacing: '0.05em' }}>LAYER 3 (TOP)</div>
-                      <input value={room.layerNames?.[2] ?? ''} onChange={(e) => setLayerName(idx, 2, e.target.value)} placeholder="e.g. No WiFi" style={{ width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid #E2C4A2', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
-                    </div>
-                  </div>
-                )}
+                {idx === selectedIdx && (() => {
+                  const getUniqueLayerNames = (lIdx) => {
+                      const names = new Set();
+                      
+                      // 1. Get from all other floors in the floors array
+                      floors.forEach((f, i) => {
+                          if (i === activeFloorIdx) return; // Skip current floor in the floors array since it's stale
+                          (f.rooms||[]).forEach(r => {
+                              const n = lIdx === 0 ? (r.layerNames?.[0] || r.name) : r.layerNames?.[lIdx];
+                              if (n && n.trim() && !/^Room \d+$/i.test(n.trim())) names.add(n.trim());
+                          });
+                      });
+                      
+                      // 2. Get from the current floor using the live 'rooms' state
+                      rooms.forEach(r => {
+                          const n = lIdx === 0 ? (r.layerNames?.[0] || r.name) : r.layerNames?.[lIdx];
+                          if (n && n.trim() && !/^Room \d+$/i.test(n.trim())) names.add(n.trim());
+                      });
+
+                      return Array.from(names).sort();
+                  };
+
+                  const renderInput = (lIdx, label) => {
+                      const currentVal = lIdx === 0 ? (room.layerNames?.[0] ?? room.name ?? '') : (room.layerNames?.[lIdx] ?? '');
+                      const presets = getUniqueLayerNames(lIdx).filter(n => n !== currentVal);
+                      return (
+                          <div>
+                            <div style={{ fontSize: 10, color: '#A87A5B', fontWeight: 700, marginBottom: 4, letterSpacing: '0.05em' }}>{label}</div>
+                            <input value={currentVal} onChange={(e) => setLayerName(idx, lIdx, e.target.value)} placeholder="e.g. Zone" style={{ width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid #E2C4A2', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                            {presets.length > 0 && (
+                                <div style={{ display:'flex', flexWrap:'wrap', gap:5, marginTop:6, maxHeight:'65px', overflowY:'auto', paddingRight:2, alignContent:'flex-start' }} className="custom-scrollbar-mini">
+                                    {presets.map(n => (
+                                        <div key={n} onClick={() => setLayerName(idx, lIdx, n)} 
+                                             style={{ fontSize:10, background:'#FDF4EC', border:'1px solid #E2C4A2', color:'#A87A5B', padding:'3px 8px', borderRadius:12, cursor:'pointer', fontWeight:500 }}
+                                             onMouseOver={(e) => { e.currentTarget.style.background = '#bd9476'; e.currentTarget.style.color = '#fff'; }}
+                                             onMouseOut={(e) => { e.currentTarget.style.background = '#FDF4EC'; e.currentTarget.style.color = '#A87A5B'; }}>
+                                            {n}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                          </div>
+                      );
+                  };
+
+                  return (
+                      <div style={{ padding: '12px 14px', background: '#FDF4EC', borderRadius: '0 0 8px 8px', border: '1px solid #E2C4A2', borderTop: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {renderInput(0, 'LAYER 1 (BASE)')}
+                        {renderInput(1, 'LAYER 2 (MIDDLE)')}
+                        {renderInput(2, 'LAYER 3 (TOP)')}
+                      </div>
+                  );
+                })()}
               </div>
             ))}
           </div>

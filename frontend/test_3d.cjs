@@ -1,0 +1,14 @@
+const THREE = require('three');
+const shape = new THREE.Shape();
+shape.moveTo(0, 0);
+shape.lineTo(2, -5);
+shape.lineTo(0, 0);
+const geo = new THREE.ShapeGeometry(shape);
+const pos = geo.attributes.position.array;
+console.log('ShapeGeometry vertex 1:', pos[3], pos[4], pos[5]);
+const mesh = new THREE.Mesh(geo);
+mesh.rotation.x = -Math.PI / 2;
+mesh.updateMatrixWorld(true);
+const vertex = new THREE.Vector3(pos[3], pos[4], pos[5]);
+vertex.applyMatrix4(mesh.matrixWorld);
+console.log('Global vertex:', vertex.x, vertex.y, vertex.z);
