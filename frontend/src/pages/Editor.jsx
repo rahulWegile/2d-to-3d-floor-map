@@ -55,7 +55,7 @@ function Editor() {
       {/* Top Toolbar */}
       <div id="top-toolbar" className="workspace-header">
         <div className="logo" style={{display:'flex', alignItems:'center', gap:10}}>
-          <h1 id="btn-back-dashboard" onClick={() => navigate('/dashboard')} style={{cursor: 'pointer'}} title="Back to Dashboard">ArchTransform</h1>
+          <h1 id="btn-back-dashboard" onClick={() => navigate('/dashboard')} style={{cursor: 'pointer'}} title="Back to Dashboard">COMPLe-TECH</h1>
           <button
             onClick={async () => {
               await saveCurrentProject();

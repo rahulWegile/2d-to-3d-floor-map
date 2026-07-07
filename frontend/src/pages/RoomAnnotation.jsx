@@ -187,8 +187,8 @@ export default function RoomAnnotation() {
     if (mode === 'draw' && drawStart && drawCurrent) {
       const x = Math.min(drawStart.x, drawCurrent.x), y = Math.min(drawStart.y, drawCurrent.y);
       const w = Math.abs(drawCurrent.x - drawStart.x), h = Math.abs(drawCurrent.y - drawStart.y);
-      ctx.globalAlpha = 0.35; ctx.fillStyle = '#bd9476'; ctx.fillRect(x, y, w, h);
-      ctx.globalAlpha = 1; ctx.strokeStyle = '#bd9476'; ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.35; ctx.fillStyle = '#2D5F8C'; ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = 1; ctx.strokeStyle = '#2D5F8C'; ctx.lineWidth = 2;
       ctx.setLineDash([5, 4]); ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
     }
   }, [rooms, selectedIdx, mode, drawStart, drawCurrent, activeFloor, aspect, filterMode]);
@@ -731,7 +731,7 @@ export default function RoomAnnotation() {
         </button>
         <div style={{ width:1, height:20, background:'#EBEBEB' }} />
         <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-          <div style={{ width:28, height:28, borderRadius:7, background:'#bd9476', display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <div style={{ width:28, height:28, borderRadius:7, background:'#2D5F8C', display:'flex', alignItems:'center', justifyContent:'center' }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
           </div>
           <span style={{ color:'#1A1A1A', fontWeight:700, fontSize:14 }}>{projName}</span>
@@ -753,17 +753,17 @@ export default function RoomAnnotation() {
             <button onClick={() => switchFloor(i)} style={{
               padding:'5px 12px', borderRadius: floors.length > 1 ? '7px 0 0 7px' : 7,
               border:'1px solid', borderRight: floors.length > 1 ? 'none' : undefined,
-              borderColor: i === activeFloorIdx ? '#bd9476' : '#EBEBEB',
-              background: i === activeFloorIdx ? '#FDF4EC' : '#fff',
-              color: i === activeFloorIdx ? '#bd9476' : '#6B7280',
+              borderColor: i === activeFloorIdx ? '#2D5F8C' : '#EBEBEB',
+              background: i === activeFloorIdx ? '#F1F5F9' : '#fff',
+              color: i === activeFloorIdx ? '#2D5F8C' : '#6B7280',
               fontSize:13, cursor:'pointer', fontWeight: i === activeFloorIdx ? 700 : 500,
             }}>Floor {i+1}</button>
             {floors.length > 1 && (
               <button onClick={() => deleteFloor(i)} title="Delete this floor" style={{
                 padding:'5px 7px', borderRadius:'0 7px 7px 0',
                 border:'1px solid',
-                borderColor: i === activeFloorIdx ? '#bd9476' : '#EBEBEB',
-                background: i === activeFloorIdx ? '#FDF4EC' : '#fff',
+                borderColor: i === activeFloorIdx ? '#2D5F8C' : '#EBEBEB',
+                background: i === activeFloorIdx ? '#F1F5F9' : '#fff',
                 color:'#9CA3AF', cursor:'pointer', fontSize:13, lineHeight:1,
               }}>×</button>
             )}
@@ -825,10 +825,10 @@ export default function RoomAnnotation() {
         </div>
 
         <button onClick={handleBuild} disabled={saving} style={{
-          padding:'0 20px', height:36, background:'#bd9476', color:'#fff',
+          padding:'0 20px', height:36, background:'#2D5F8C', color:'#fff',
           border:'none', borderRadius:8, fontWeight:700, fontSize:13, cursor:'pointer',
           display:'flex', alignItems:'center', gap:8, opacity: saving ? 0.7 : 1,
-          boxShadow:'0 2px 8px rgba(189,148,118,0.3)',
+          boxShadow:'0 2px 8px rgba(45,95,140,0.3)',
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M5 3h14l2 5H3z"/><rect x="3" y="8" width="18" height="13" rx="1"/><path d="M9 21v-6h6v6"/></svg>
           {saving ? 'Building…' : 'Build 3D Model'}
@@ -858,12 +858,12 @@ export default function RoomAnnotation() {
                   style={{
                     padding:'8px 10px', borderRadius: idx === selectedIdx ? '8px 8px 0 0' : 8, cursor:'pointer',
                     display:'flex', alignItems:'center', gap:9,
-                    background: idx === selectedIdx ? '#FDF4EC' : 'transparent',
-                    border: `1px solid ${idx === selectedIdx ? '#E2C4A2' : 'transparent'}`,
+                    background: idx === selectedIdx ? '#F1F5F9' : 'transparent',
+                    border: `1px solid ${idx === selectedIdx ? '#CBD5E1' : 'transparent'}`,
                     borderBottom: idx === selectedIdx ? 'none' : undefined,
                   }}>
                   <div style={{ width:11, height:11, borderRadius:3, background:room.color, flexShrink:0 }} />
-                  <span style={{ color: idx === selectedIdx ? '#bd9476' : '#4B5563', fontSize:13, fontWeight: idx === selectedIdx ? 600 : 400, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  <span style={{ color: idx === selectedIdx ? '#2D5F8C' : '#4B5563', fontSize:13, fontWeight: idx === selectedIdx ? 600 : 400, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
                     {room.name || '(unnamed)'}
                   </span>
                 </div>
@@ -895,15 +895,15 @@ export default function RoomAnnotation() {
                       const presets = getUniqueLayerNames(lIdx).filter(n => n !== currentVal);
                       return (
                           <div>
-                            <div style={{ fontSize: 10, color: '#A87A5B', fontWeight: 700, marginBottom: 4, letterSpacing: '0.05em' }}>{label}</div>
-                            <input value={currentVal} onChange={(e) => setLayerName(idx, lIdx, e.target.value)} placeholder="e.g. Zone" style={{ width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid #E2C4A2', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
+                            <div style={{ fontSize: 10, color: '#475569', fontWeight: 700, marginBottom: 4, letterSpacing: '0.05em' }}>{label}</div>
+                            <input value={currentVal} onChange={(e) => setLayerName(idx, lIdx, e.target.value)} placeholder="e.g. Zone" style={{ width: '100%', padding: '6px 8px', borderRadius: 4, border: '1px solid #CBD5E1', fontSize: 12, outline: 'none', boxSizing: 'border-box' }} />
                             {presets.length > 0 && (
                                 <div style={{ display:'flex', flexWrap:'wrap', gap:5, marginTop:6, maxHeight:'65px', overflowY:'auto', paddingRight:2, alignContent:'flex-start' }} className="custom-scrollbar-mini">
                                     {presets.map(n => (
                                         <div key={n} onClick={() => setLayerName(idx, lIdx, n)} 
-                                             style={{ fontSize:10, background:'#FDF4EC', border:'1px solid #E2C4A2', color:'#A87A5B', padding:'3px 8px', borderRadius:12, cursor:'pointer', fontWeight:500 }}
-                                             onMouseOver={(e) => { e.currentTarget.style.background = '#bd9476'; e.currentTarget.style.color = '#fff'; }}
-                                             onMouseOut={(e) => { e.currentTarget.style.background = '#FDF4EC'; e.currentTarget.style.color = '#A87A5B'; }}>
+                                             style={{ fontSize:10, background:'#F1F5F9', border:'1px solid #CBD5E1', color:'#475569', padding:'3px 8px', borderRadius:12, cursor:'pointer', fontWeight:500 }}
+                                             onMouseOver={(e) => { e.currentTarget.style.background = '#2D5F8C'; e.currentTarget.style.color = '#fff'; }}
+                                             onMouseOut={(e) => { e.currentTarget.style.background = '#F1F5F9'; e.currentTarget.style.color = '#475569'; }}>
                                             {n}
                                         </div>
                                     ))}
@@ -914,7 +914,7 @@ export default function RoomAnnotation() {
                   };
 
                   return (
-                      <div style={{ padding: '12px 14px', background: '#FDF4EC', borderRadius: '0 0 8px 8px', border: '1px solid #E2C4A2', borderTop: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div style={{ padding: '12px 14px', background: '#F1F5F9', borderRadius: '0 0 8px 8px', border: '1px solid #CBD5E1', borderTop: 'none', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                         {renderInput(0, 'LAYER 1 (BASE)')}
                         {renderInput(1, 'LAYER 2 (MIDDLE)')}
                         {renderInput(2, 'LAYER 3 (TOP)')}
@@ -929,7 +929,7 @@ export default function RoomAnnotation() {
         {/* Canvas */}
         <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', background:'#F0EEE9', position:'relative', overflow:'hidden' }}>
           {mode === 'draw' && (
-            <div style={{ position:'absolute', top:14, left:'50%', transform:'translateX(-50%)', background:'#bd9476', color:'#fff', fontSize:13, fontWeight:600, padding:'6px 18px', borderRadius:20, zIndex:10, pointerEvents:'none', boxShadow:'0 2px 8px rgba(189,148,118,0.4)' }}>
+            <div style={{ position:'absolute', top:14, left:'50%', transform:'translateX(-50%)', background:'#2D5F8C', color:'#fff', fontSize:13, fontWeight:600, padding:'6px 18px', borderRadius:20, zIndex:10, pointerEvents:'none', boxShadow:'0 2px 8px rgba(45,95,140,0.4)' }}>
               {drawStart ? 'Release to finish' : 'Click & drag to draw a room'}
             </div>
           )}
@@ -980,7 +980,7 @@ export default function RoomAnnotation() {
                       style={{ width:'100%', padding:'6px 8px', background:'#F5F5F4', border:'1px solid #EBEBEB', borderRadius:6, color:'#1A1A1A', fontSize:13, outline:'none', boxSizing:'border-box' }} />
                   </div>
                 </div>
-                <button onClick={applySize} style={{ width:'100%', padding:'7px', borderRadius:7, border:'1px solid #bd9476', background:'#FDF4EC', color:'#bd9476', fontSize:13, fontWeight:600, cursor:'pointer' }}>
+                <button onClick={applySize} style={{ width:'100%', padding:'7px', borderRadius:7, border:'1px solid #2D5F8C', background:'#F1F5F9', color:'#2D5F8C', fontSize:13, fontWeight:600, cursor:'pointer' }}>
                   Apply Size
                 </button>
               </div>

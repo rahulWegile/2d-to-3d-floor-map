@@ -54,8 +54,6 @@ async def upload_files(files: List[UploadFile] = File(...)):
                                 final_res = step
                         if final_res:
                             asyncio.run_coroutine_threadsafe(queue.put(("result", file_idx, final_res, fpath)), loop)
-                            if len(final_res["walls"]) > 0 or len(final_res["rooms"]) > 0:
-                                break
                 else:
                     fname = f"floor_img_{file_idx}_{int(time.time()*1000)}.png"
                     fpath = f"uploads/{fname}"
@@ -99,12 +97,14 @@ async def upload_files(files: List[UploadFile] = File(...)):
                 avg_pct = sum(progress_map.values()) // len(progress_map)
                 yield f"data: {json.dumps({'status': 'progress', 'progress': avg_pct, 'message': extra})}\n\n"
             elif msg_type == "result":
-                results[file_idx] = {
+                if file_idx not in results:
+                    results[file_idx] = []
+                results[file_idx].append({
                     "walls": payload["walls"], "rooms": payload["rooms"],
                     "doors": payload.get("doors", []),
                     "imageUrl": f"/{extra}?t={time.time()}",
                     "width": payload["width"], "height": payload["height"],
-                }
+                })
             elif msg_type == "error":
                 errors.append(f"File {file_idx}: {payload}")
                 
@@ -112,7 +112,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
             yield f"data: {json.dumps({'status': 'error', 'message': f'Failed to process floors. Errors: {errors}'})}\n\n"
             return
             
-        final_list = [results[i] for i in range(len(file_data)) if i in results]
+        final_list = [floor for i in range(len(file_data)) if i in results for floor in results[i]]
         yield f"data: {json.dumps({'status': 'success', 'data': {'floors': final_list}})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -218,26 +218,26 @@ function updateRoomCategoryFilters() {
             padding: 5px 10px;
             border-radius: 12px;
             cursor: pointer;
-            border: 1px solid ${isActive ? '#bd9476' : '#E2C4A2'};
-            background: ${isActive ? '#bd9476' : '#FDF4EC'};
-            color: ${isActive ? '#fff' : '#A87A5B'};
+            border: 1px solid ${isActive ? '#2D5F8C' : '#CBD5E1'};
+            background: ${isActive ? '#2D5F8C' : '#F1F5F9'};
+            color: ${isActive ? '#fff' : '#475569'};
             font-weight: 500;
             transition: all 0.2s ease;
-            box-shadow: ${isActive ? '0 2px 6px rgba(189,148,118,0.3)' : 'none'};
+            box-shadow: ${isActive ? '0 2px 6px rgba(45,95,140,0.3)' : 'none'};
         `;
         
         btn.onmouseover = () => {
             if (!isActive) {
-                btn.style.background = '#bd9476';
-                btn.style.borderColor = '#bd9476';
+                btn.style.background = '#2D5F8C';
+                btn.style.borderColor = '#2D5F8C';
                 btn.style.color = '#fff';
             }
         };
         btn.onmouseout = () => {
             if (!isActive) {
-                btn.style.background = '#FDF4EC';
-                btn.style.borderColor = '#E2C4A2';
-                btn.style.color = '#A87A5B';
+                btn.style.background = '#F1F5F9';
+                btn.style.borderColor = '#CBD5E1';
+                btn.style.color = '#475569';
             }
         };
 
@@ -1639,7 +1639,7 @@ function onClick(event) {
                 drawStartPoint = null;
                 if(drawPreviewLine) { scene.remove(drawPreviewLine); if(drawPreviewLine.geometry) drawPreviewLine.geometry.dispose(); if(drawPreviewLine.material) drawPreviewLine.material.dispose(); drawPreviewLine = null; }
                 const drawBtn = document.getElementById('draw-wall-btn');
-                if(drawBtn) drawBtn.style.background = 'var(--accent)';
+                if(drawBtn) drawBtn.style.background = '#2D5F8C';
                 if(drawBtn) drawBtn.innerText = 'Draw Wall';
             }
         }
@@ -1945,7 +1945,8 @@ function selectRoom(labelObj) {
             const allBtn = document.createElement('button');
             allBtn.innerText = 'Show All Layers';
             allBtn.className = 'tool-btn';
-            allBtn.style.background = 'var(--accent)';
+            allBtn.style.background = '#2D5F8C';
+            allBtn.style.color = '#fff';
             allBtn.style.border = '2px solid #fff';
             allBtn.onclick = () => {
                 window.isolatedLayerIndex = null;
@@ -1963,7 +1964,7 @@ function selectRoom(labelObj) {
                 btn.onclick = () => {
                     window.isolatedLayerIndex = l.layerIndex;
                     Array.from(btns.children).forEach(b => b.style.border = 'none');
-                    btn.style.border = '2px solid var(--accent)';
+                    btn.style.border = '2px solid #2D5F8C';
                     
                     selectedRoomLabel = l;
                     document.getElementById('room-name-input').value = l.name || '';

@@ -3,16 +3,16 @@
     --panel-bg: rgba(255, 255, 255, 0.95);
     --text-primary: #0f172a;
     --text-secondary: #475569;
-    --accent: #c58656;
-    --accent-hover: #b47040;
-    --accent-glow: rgba(197, 134, 86, 0.3);
+    --accent: #111827;
+    --accent-hover: #374151;
+    --accent-glow: rgba(17, 24, 39, 0.3);
     --border: rgba(0, 0, 0, 0.1);
     --glass-blur: blur(24px);
     --radius-lg: 16px;
     --radius-md: 10px;
     
     /* Button Colors */
-    --btn-primary: linear-gradient(135deg, #e2b48a, #c58656);
+    --btn-primary: linear-gradient(135deg, #374151, #111827);
     --btn-danger: linear-gradient(135deg, #ef4444, #dc2626);
     --btn-warning: linear-gradient(135deg, #f59e0b, #d97706);
     --btn-success: linear-gradient(135deg, #10b981, #059669);
@@ -266,7 +266,7 @@ body {
     gap: 7px;
     padding: 0 18px;
     height: 34px;
-    background: #bd9476;
+    background: #2D5F8C;
     color: #fff;
     border: none;
     border-radius: 8px;
@@ -277,11 +277,11 @@ body {
     letter-spacing: 0.2px;
     transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
     white-space: nowrap;
-    box-shadow: 0 1px 3px rgba(189,148,118,0.25);
+    box-shadow: 0 1px 3px rgba(45,95,140,0.25);
 }
 .save-btn:hover {
-    background: #a8805f;
-    box-shadow: 0 4px 12px rgba(189,148,118,0.35);
+    background: #1e4363;
+    box-shadow: 0 4px 12px rgba(45,95,140,0.35);
     transform: translateY(-1px);
 }
 .save-btn:active {
@@ -373,16 +373,16 @@ body {
 }
 
 .tool-btn.active {
-    background: #FDF4EC;
-    color: #C58656;
-    border-color: rgba(197,134,86,0.2);
+    background: #111827;
+    color: #FFFFFF;
+    border-color: #111827;
 }
 
-.tool-btn.active svg { stroke: #C58656; }
+.tool-btn.active svg { stroke: #FFFFFF; }
 
 .warning-tool:hover { color: #D97706; background: #FFFBEB; border-color: #FDE68A; }
 .pink-tool:hover    { color: #DB2777; background: #FDF2F8; border-color: #FBCFE8; }
-.primary-tool:hover { color: #C58656; background: #FDF4EC; border-color: rgba(197,134,86,0.2); }
+.primary-tool:hover { color: #111827; background: #E2E8F0; border-color: rgba(17, 24, 39, 0.2); }
 
 /* ── Bottom delete zone — hidden until engine shows the button ── */
 .lp-delete-zone {
@@ -614,7 +614,7 @@ body {
 }
 
 .primary-btn {
-    background: #bd9476;
+    background: #111827;
     color: #fff;
     padding: 14px 28px;
     border-radius: 12px;
@@ -634,7 +634,7 @@ body {
 
 .primary-btn:hover {
     transform: translateY(-4px) scale(1.02);
-    box-shadow: 0 12px 32px rgba(189, 148, 118, 0.4);
+    box-shadow: 0 12px 32px rgba(17, 24, 39, 0.4);
 }
 
 .dash-project-grid {
@@ -683,8 +683,8 @@ body {
 
 .modern-project-card:hover {
     transform: translateY(-8px);
-    border-color: rgba(197, 134, 86, 0.4);
-    box-shadow: 0 20px 40px rgba(0,0,0,0.1), 0 0 20px rgba(197, 134, 86, 0.15);
+    border-color: rgba(17, 24, 39, 0.4);
+    box-shadow: 0 20px 40px rgba(0,0,0,0.1), 0 0 20px rgba(17, 24, 39, 0.15);
     background: #ffffff;
 }
 
@@ -871,7 +871,7 @@ select {
     height: 14px;
     border-radius: 50%;
     border: 2px solid #FCD6A4;
-    border-top-color: #C58656;
+    border-top-color: #111827;
     animation: spin 0.75s linear infinite;
     flex-shrink: 0;
 }

@@ -119,8 +119,8 @@ function ProjectCard({ name, floors, onClick, onDelete, onRename }) {
       {/* Icon */}
       <div style={{
         width: '42px', height: '42px',
-        background: hovered ? '#FDF4EC' : '#F5F5F4',
-        border: `1px solid ${hovered ? '#E8C9A8' : '#EBEBEB'}`,
+        background: hovered ? '#E2E8F0' : '#F5F5F4',
+        border: `1px solid ${hovered ? '#CBD5E1' : '#EBEBEB'}`,
         borderRadius: '10px',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         marginBottom: '16px',
@@ -128,7 +128,7 @@ function ProjectCard({ name, floors, onClick, onDelete, onRename }) {
         flexShrink: 0,
       }}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-          stroke={hovered ? '#C58656' : '#A3A3A3'}
+          stroke={hovered ? '#111827' : '#A3A3A3'}
           strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"
           style={{ transition: 'stroke 0.18s ease' }}>
           <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
@@ -154,7 +154,7 @@ function ProjectCard({ name, floors, onClick, onDelete, onRename }) {
           transition: 'opacity 0.18s ease, transform 0.18s ease',
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-            stroke="#C58656" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            stroke="#111827" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M5 12h14"/><path d="M12 5l7 7-7 7"/>
           </svg>
         </div>
@@ -271,8 +271,8 @@ function EmptyState({ onCreateClick }) {
         <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
           <rect x="10" y="6" width="36" height="44" rx="4" stroke="#E2E2E2" strokeWidth="2"/>
           <path d="M18 18h20M18 25h20M18 32h13" stroke="#D1D5DB" strokeWidth="2" strokeLinecap="round"/>
-          <circle cx="38" cy="38" r="6" stroke="#C58656" strokeWidth="2"/>
-          <path d="M42.5 42.5l3.5 3.5" stroke="#C58656" strokeWidth="2.5" strokeLinecap="round"/>
+          <circle cx="38" cy="38" r="6" stroke="#111827" strokeWidth="2"/>
+          <path d="M42.5 42.5l3.5 3.5" stroke="#111827" strokeWidth="2.5" strokeLinecap="round"/>
         </svg>
       </div>
       <h3 style={{
@@ -284,10 +284,10 @@ function EmptyState({ onCreateClick }) {
       </p>
       <button onClick={onCreateClick} style={{
         display: 'inline-flex', alignItems: 'center', gap: '8px',
-        background: '#C58656', color: '#FFFFFF',
+        background: '#111827', color: '#FFFFFF',
         padding: '11px 22px', borderRadius: '10px', border: 'none',
         fontSize: '14px', fontWeight: '600', cursor: 'pointer',
-        letterSpacing: '-0.1px', boxShadow: '0 1px 3px rgba(197, 134, 86, 0.3)',
+        letterSpacing: '-0.1px', boxShadow: '0 1px 3px rgba(17, 24, 39, 0.3)',
       }}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
           stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -364,17 +364,17 @@ function UploadModal({ projectName, onNameChange, onUpload, onDrop, isDragging, 
 
           <div
             style={{
-              border: `1.5px dashed ${isDragging ? '#C58656' : '#D1D5DB'}`,
+              border: `1.5px dashed ${isDragging ? '#111827' : '#D1D5DB'}`,
               borderRadius: '12px', padding: '28px 20px', textAlign: 'center',
               display: 'flex', flexDirection: 'column', alignItems: 'center',
-              background: isDragging ? '#FDF4EC' : '#FAFAFA', transition: 'all 0.18s ease',
+              background: isDragging ? '#F8FAFC' : '#FAFAFA', transition: 'all 0.18s ease',
             }}
             onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={onDrop}
           >
             <svg width="26" height="26" viewBox="0 0 24 24" fill="none"
-              stroke={isDragging ? '#C58656' : '#9CA3AF'}
+              stroke={isDragging ? '#111827' : '#9CA3AF'}
               strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
               style={{ marginBottom: '10px', transition: 'stroke 0.18s ease' }}>
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -401,16 +401,16 @@ function UploadModal({ projectName, onNameChange, onUpload, onDrop, isDragging, 
             <div style={{
               display: 'flex', flexDirection: 'column', gap: '10px',
               padding: '14px 16px', borderRadius: '10px',
-              background: isError ? '#FEF2F2' : '#FDF4EC',
-              border: `1px solid ${isError ? '#FECACA' : '#FCD6A4'}`,
+              background: isError ? '#FEF2F2' : '#F1F5F9',
+              border: `1px solid ${isError ? '#FECACA' : '#CBD5E1'}`,
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '13.5px', fontWeight: '500', color: isError ? '#991B1B' : '#92400E' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '13.5px', fontWeight: '500', color: isError ? '#991B1B' : '#334155' }}>
                 {isLoading && <div className="dash-spinner" />}
                 {isError ? statusMsg : "Processing..."}
               </div>
               {isLoading && !isError && progress !== undefined && (
-                <div style={{ width: '100%', height: '6px', background: 'rgba(197, 134, 86, 0.2)', borderRadius: '4px', overflow: 'hidden' }}>
-                  <div style={{ width: `${progress}%`, height: '100%', background: '#C58656', borderRadius: '4px', transition: 'width 0.3s ease' }} />
+                <div style={{ width: '100%', height: '6px', background: 'rgba(17, 24, 39, 0.2)', borderRadius: '4px', overflow: 'hidden' }}>
+                  <div style={{ width: `${progress}%`, height: '100%', background: '#111827', borderRadius: '4px', transition: 'width 0.3s ease' }} />
                 </div>
               )}
             </div>
@@ -425,6 +425,93 @@ function UploadModal({ projectName, onNameChange, onUpload, onDrop, isDragging, 
    Main Dashboard
 ───────────────────────────────────────────────────────────── */
 
+function ConfigModal({ roomConfig, setRoomConfig, uniqueCategories, onSave, onCancel }) {
+  const handleCountChange = (floorIdx, cat, val) => {
+    const newVal = parseInt(val, 10) || 0;
+    const newConfig = [...roomConfig];
+    newConfig[floorIdx].counts[cat] = newVal;
+    setRoomConfig(newConfig);
+  };
+
+  const applyFloor1 = () => {
+    if (roomConfig.length <= 1) return;
+    const f1 = roomConfig[0].counts;
+    const newConfig = roomConfig.map((cfg, i) => i === 0 ? cfg : { ...cfg, counts: { ...f1 } });
+    setRoomConfig(newConfig);
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+      background: 'rgba(15, 15, 15, 0.45)', backdropFilter: 'blur(6px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+    }}>
+      <div style={{
+        background: '#FFFFFF', borderRadius: '12px', width: '900px', maxWidth: '95vw',
+        maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
+        border: '1px solid #EBEBEB',
+      }}>
+        <div style={{ padding: '24px', borderBottom: '1px solid #F5F5F4' }}>
+          <h2 style={{ margin: 0, fontFamily: "'Outfit', sans-serif", fontSize: '20px', fontWeight: '700', color: '#1A1A1A' }}>Project Configuration</h2>
+        </div>
+        <div style={{ padding: '24px' }}>
+          <div style={{ marginBottom: '24px' }}>
+            <label style={{ fontSize: '13px', fontWeight: '600', color: '#111827', display: 'block', marginBottom: '8px' }}>Number of Floors</label>
+            <input type="text" value={roomConfig.length} readOnly style={{
+              padding: '10px 14px', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '8px',
+              color: '#94A3B8', fontSize: '14px', width: '200px', outline: 'none'
+            }} />
+          </div>
+          <div style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+            <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600', color: '#334155' }}>Per Floor Room Counts</h3>
+            <button onClick={applyFloor1} style={{
+              padding: '8px 14px', background: '#F1F5F9', border: '1px solid #CBD5E1', borderRadius: '6px',
+              color: '#475569', fontSize: '13px', fontWeight: '600', cursor: 'pointer'
+            }}>Apply Same Config (from Floor 1)</button>
+          </div>
+          
+          <div style={{ overflowX: 'auto', border: '1px solid #E2E8F0', borderRadius: '8px' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+              <thead>
+                <tr style={{ background: '#F8FAFC', borderBottom: '1px solid #E2E8F0' }}>
+                  <th style={{ padding: '12px 16px', fontSize: '11px', fontWeight: '700', color: '#64748B', letterSpacing: '0.05em' }}>FLOOR NAME</th>
+                  {uniqueCategories.map(c => (
+                    <th key={c} style={{ padding: '12px 16px', fontSize: '11px', fontWeight: '700', color: '#64748B', letterSpacing: '0.05em', textTransform: 'uppercase' }}>{c}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {roomConfig.map((cfg, idx) => (
+                  <tr key={idx} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                    <td style={{ padding: '12px 16px' }}>
+                      <input type="text" value={`Floor ${idx + 1}`} readOnly style={{
+                        padding: '8px 12px', background: '#F8FAFC', border: '1px solid #F1F5F9', borderRadius: '6px',
+                        color: '#94A3B8', fontSize: '13px', width: '100px', outline: 'none'
+                      }} />
+                    </td>
+                    {uniqueCategories.map(c => (
+                      <td key={c} style={{ padding: '12px 16px' }}>
+                        <input type="number" min="0" value={cfg.counts[c]} onChange={(e) => handleCountChange(idx, c, e.target.value)} style={{
+                          padding: '8px 12px', background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '6px',
+                          color: '#334155', fontSize: '13px', width: '80px', outline: 'none'
+                        }} />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div style={{ padding: '16px 24px', borderTop: '1px solid #F5F5F4', display: 'flex', justifyContent: 'flex-end', gap: '10px', background: '#FAFAFA', borderRadius: '0 0 12px 12px' }}>
+          <button onClick={onCancel} style={{ padding: '9px 16px', background: '#FFFFFF', border: '1px solid #E5E5E5', borderRadius: '8px', color: '#525252', fontSize: '13.5px', fontWeight: '600', cursor: 'pointer' }}>Cancel</button>
+          <button onClick={onSave} style={{ padding: '9px 20px', background: '#2D5F8C', border: 'none', borderRadius: '8px', color: '#FFFFFF', fontSize: '13.5px', fontWeight: '600', cursor: 'pointer' }}>Save & Continue</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Dashboard() {
   const [projects, setProjects] = useState([]);
   const [showUpload, setShowUpload] = useState(false);
@@ -435,6 +522,11 @@ function Dashboard() {
   const [logoutHover, setLogoutHover] = useState(false);
   const [createHover, setCreateHover] = useState(false);
   const [renamingProject, setRenamingProject] = useState(null); // { project_id, name }
+  
+  const [extractedFloors, setExtractedFloors] = useState(null);
+  const [showConfigMenu, setShowConfigMenu] = useState(false);
+  const [roomConfig, setRoomConfig] = useState([]);
+  const [uniqueCategories, setUniqueCategories] = useState([]);
 
   const navigate = useNavigate();
   const userId = localStorage.getItem('user_id');
@@ -484,21 +576,54 @@ function Dashboard() {
         setUploadStatus(msg);
       });
 
-      setUploadStatus('Saving project...');
+      setUploadStatus('Processing complete. Awaiting configuration...');
       setUploadProgress(100);
 
+      const floors = data.floors || [];
+      const cats = new Set();
+      const initialConfig = floors.map((f, i) => {
+          const counts = {};
+          (f.rooms || []).forEach(r => {
+              const name = (r.name || 'Room').toUpperCase();
+              cats.add(name);
+              counts[name] = (counts[name] || 0) + 1;
+          });
+          return { floorIndex: i, counts };
+      });
+      
+      const catsArray = Array.from(cats).sort();
+      initialConfig.forEach(cfg => {
+          catsArray.forEach(c => {
+              if (cfg.counts[c] === undefined) cfg.counts[c] = 0;
+          });
+      });
+      
+      setUniqueCategories(catsArray);
+      setRoomConfig(initialConfig);
+      setExtractedFloors(floors);
+      setShowUpload(false);
+      setShowConfigMenu(true);
+    } catch (err) {
+      setUploadStatus(`error:${err.message}`);
+    }
+  };
+
+  const handleSaveConfig = async () => {
+    try {
       const saveRes = await fetchApi('/projects/save', {
         method: 'POST',
         body: JSON.stringify({
           user_id: userId,
           name: newProjectName || 'Untitled Project',
-          rawBackendData: data.floors,
+          rawBackendData: extractedFloors,
+          settings: { roomConfig }
         }),
       });
-
+      setShowConfigMenu(false);
       navigate(`/annotate?project_id=${saveRes.project_id}`);
-    } catch (err) {
-      setUploadStatus(`error:${err.message}`);
+    } catch(err) {
+      console.error(err);
+      alert('Failed to save project config');
     }
   };
 
@@ -537,13 +662,13 @@ function Dashboard() {
   const initials = userId ? userId.charAt(0).toUpperCase() : 'U';
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: '#FAFAF8', fontFamily: "'Inter', sans-serif" }}>
+    <div style={{ display: 'flex', height: '100vh', background: '#F9FAFB', fontFamily: "'Inter', sans-serif" }}>
 
       {/* ── Sidebar ─────────────────────────────────── */}
       <aside style={{
         width: '280px', minWidth: '280px',
-        background: '#FFFFFF',
-        borderRight: '1px solid #EBEBEB',
+        background: '#1E293B',
+        borderRight: '1px solid #0F172A',
         display: 'flex', flexDirection: 'column',
         padding: '24px 16px',
         height: '100vh',
@@ -553,7 +678,7 @@ function Dashboard() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '32px', padding: '0 8px' }}>
           <div style={{
             width: '30px', height: '30px', borderRadius: '8px',
-            background: '#C58656',
+            background: '#111827',
             display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
           }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -565,14 +690,14 @@ function Dashboard() {
           <span style={{
             fontFamily: "'Outfit', sans-serif",
             fontSize: '16px', fontWeight: '700',
-            color: '#1A1A1A', letterSpacing: '-0.3px',
-          }}>ArchTransform</span>
+            color: '#F8FAFC', letterSpacing: '-0.3px',
+          }}>COMPLe-TECH</span>
         </div>
 
         {/* Nav */}
         <nav style={{ flex: 1 }}>
           <p style={{
-            fontSize: '10.5px', fontWeight: '600', color: '#C2C2C2',
+            fontSize: '10.5px', fontWeight: '600', color: '#94A3B8',
             letterSpacing: '0.09em', textTransform: 'uppercase',
             padding: '0 10px', marginBottom: '6px',
           }}>Workspace</p>
@@ -581,11 +706,11 @@ function Dashboard() {
             display: 'flex', alignItems: 'center', gap: '10px',
             padding: '9px 12px',
             textDecoration: 'none',
-            color: '#C58656',
+            color: '#34D399',
             fontSize: '13.5px', fontWeight: '600',
             borderRadius: '8px',
-            background: '#FDF4EC',
-            border: '1px solid rgba(197,134,86,0.15)',
+            background: '#2D4A54',
+            border: '1px solid rgba(52,211,153,0.15)',
           }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
               stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -599,20 +724,20 @@ function Dashboard() {
         </nav>
 
         {/* Footer */}
-        <div style={{ paddingTop: '16px', borderTop: '1px solid #F0F0EE' }}>
+        <div style={{ paddingTop: '16px', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 12px', marginBottom: '4px' }}>
             <div style={{
               width: '32px', height: '32px', borderRadius: '50%',
-              background: '#FDF4EC', border: '1.5px solid #E8C9A8',
+              background: '#2D4A54', border: '1.5px solid rgba(52,211,153,0.3)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: '12px', fontWeight: '700', color: '#C58656', flexShrink: 0,
+              fontSize: '12px', fontWeight: '700', color: '#34D399', flexShrink: 0,
             }}>{initials}</div>
             <div style={{ overflow: 'hidden' }}>
               <p style={{
-                fontSize: '13px', fontWeight: '600', color: '#1A1A1A',
+                fontSize: '13px', fontWeight: '600', color: '#F8FAFC',
                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
               }}>My Account</p>
-              <p style={{ fontSize: '11px', color: '#B0B0B0' }}>Professional</p>
+              <p style={{ fontSize: '11px', color: '#94A3B8' }}>Professional</p>
             </div>
           </div>
 
@@ -623,9 +748,9 @@ function Dashboard() {
             style={{
               display: 'flex', alignItems: 'center', gap: '9px',
               width: '100%', padding: '9px 12px',
-              background: logoutHover ? '#F5F5F4' : 'transparent',
+              background: logoutHover ? 'rgba(255,255,255,0.05)' : 'transparent',
               border: 'none', borderRadius: '8px',
-              color: logoutHover ? '#1A1A1A' : '#A3A3A3',
+              color: logoutHover ? '#FFFFFF' : '#94A3B8',
               fontSize: '13px', fontWeight: '500',
               cursor: 'pointer', textAlign: 'left',
               transition: 'background 0.15s ease, color 0.15s ease',
@@ -732,6 +857,17 @@ function Dashboard() {
           currentName={renamingProject.name}
           onSave={(newName) => handleRename(renamingProject.project_id, newName)}
           onClose={() => setRenamingProject(null)}
+        />
+      )}
+
+      {/* Config Menu Modal */}
+      {showConfigMenu && (
+        <ConfigModal 
+          roomConfig={roomConfig} 
+          setRoomConfig={setRoomConfig} 
+          uniqueCategories={uniqueCategories} 
+          onSave={handleSaveConfig} 
+          onCancel={() => setShowConfigMenu(false)} 
         />
       )}
     </div>
